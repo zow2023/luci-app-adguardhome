@@ -1,23 +1,28 @@
 {
 	"luci-app-adguardhome": {
 		"description": "Grant permissions for the AdGuard Home LuCI app",
+
 		"read": {
 			"file": {
 				"/tmp/AdGuardHome_update.log": [ "read" ],
 				"/var/run/update_core": [ "stat" ],
+				"/var/run/update_core_done": [ "stat" ],
 				"/var/run/update_core_error": [ "stat" ],
 				"/var/run/AdGredir": [ "read" ],
 				"/var/run/AdGserverdis": [ "read" ],
-				"/usr/bin/AdGuardHome --version": [ "exec" ]
+				"/etc/adguardhome/adguardhome.yaml": [ "read" ],
+				"/usr/bin/AdGuardHome": [ "exec" ]
 			},
 			"ubus": {
 				"service": [ "list" ]
 			},
 			"uci": [ "adguardhome" ]
 		},
+
 		"write": {
 			"file": {
-				"/usr/share/AdGuardHome/update_core.sh": [ "exec" ]
+				"/usr/share/AdGuardHome/update_core.sh": [ "exec" ],
+				"/var/run/update_core_done": [ "write" ]
 			},
 			"uci": [ "adguardhome" ]
 		}
