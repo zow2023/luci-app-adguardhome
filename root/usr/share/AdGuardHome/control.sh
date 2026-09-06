@@ -1,5 +1,6 @@
 #!/bin/sh
 # /usr/share/AdGuardHome/control.sh
+
 . /usr/share/AdGuardHome/helper.sh
 
 ENABLED="$1"
@@ -8,700 +9,648 @@ NFT_RULES_TPL="/usr/share/AdGuardHome/adguardhome.nft.tpl"
 NFT_RULES_FILE="/var/etc/adguardhome.nft"
 NFT_TABLE="adguardhome"
 
-# Volatile runtime state.
-# Describes the last redirect mode applied by this script.
 RUNTIME_STATE_FILE="/var/run/adguardhome.state"
-
-# Persistent backup of the user's original dnsmasq configuration.
-# Keep it under /etc/adguardhome because /etc survives reboot on OpenWrt.
 DNSMASQ_STATE_DIR="/etc/adguardhome"
 DNSMASQ_STATE_FILE="${DNSMASQ_STATE_DIR}/dnsmasq.state"
 
 
-# ---------------------------------------------------------------------------
 # nftables redirect
-# ---------------------------------------------------------------------------
 
 set_nft_redirect() {
-    local port="$1"
-    local wan_section_name
-    local wan_ifs=""
-    local wan_nft_set=""
-    local ifname
+	local port="$1" wan_section_name wan_ifs="" wan_nft_set="" ifname
 
-    [ -n "$port" ] || return 1
-    [ -f "$NFT_RULES_TPL" ] || return 1
+	[ -n "$port" ] || return 1
+	[ -f "$NFT_RULES_TPL" ] || return 1
 
-    # Get network interfaces assigned to wan zone
-    wan_ifs="$(uci -q get firewall.wan.network 2>/dev/null)"
+	case "$port" in
+		''|*[!0-9]*)
+			logger -t adguardhome "invalid AGH nft port: $port"
+			return 1
+			;;
+	esac
 
-    if [ -z "$wan_ifs" ]; then
-        wan_section_name="$(
-            uci show firewall 2>/dev/null |
-                awk -F'.' '/\.name='\''wan'\''$/ {print $2}' | head -n 1
-        )"
+	[ "$port" -ge 1 ] 2>/dev/null || return 1
+	[ "$port" -le 65535 ] 2>/dev/null || return 1
 
-        [ -n "$wan_section_name" ] &&
-            wan_ifs="$(uci -q get firewall."$wan_section_name".network 2>/dev/null)"
-    fi
+	wan_ifs="$(uci -q get firewall.wan.network 2>/dev/null)"
 
-    for ifname in $wan_ifs; do
-        [ -n "$wan_nft_set" ] && wan_nft_set="${wan_nft_set}, "
-        wan_nft_set="${wan_nft_set}\"${ifname}\""
-    done
+	if [ -z "$wan_ifs" ]; then
+		wan_section_name="$(
+			uci show firewall 2>/dev/null |
+				awk -F'.' '/\.name='\''wan'\''$/ {print $2}' |
+				head -n 1
+		)"
 
-    sed \
-        -e "s/__WAN_EXCLUDES__/${wan_nft_set}/g" \
-        -e "s/__AGH_PORT__/${port}/g" \
-        "$NFT_RULES_TPL" > "$NFT_RULES_FILE" || return 1
+		if [ -n "$wan_section_name" ]; then
+			wan_ifs="$(
+				uci -q get firewall."$wan_section_name".network 2>/dev/null
+			)"
+		fi
+	fi
 
-    nft delete table inet "$NFT_TABLE" 2>/dev/null
-    nft -f "$NFT_RULES_FILE" 2>/dev/null || true
-    fw4 reload >/dev/null 2>&1
+	for ifname in $wan_ifs; do
+		[ -n "$wan_nft_set" ] &&
+			wan_nft_set="${wan_nft_set}, "
+		wan_nft_set="${wan_nft_set}\"${ifname}\""
+	done
 
-    logger -t adguardhome \
-        "nft table $NFT_TABLE applied on port $port, WAN excludes: ${wan_nft_set:-none}"
+	if [ -n "$wan_nft_set" ]; then
+		sed \
+			-e "s/__WAN_EXCLUDES__/${wan_nft_set}/g" \
+			-e "s/__AGH_PORT__/${port}/g" \
+			"$NFT_RULES_TPL" > "$NFT_RULES_FILE"
+	else
+		sed \
+			-e "/iifname { __WAN_EXCLUDES__ } return/d" \
+			-e "s/__AGH_PORT__/${port}/g" \
+			"$NFT_RULES_TPL" > "$NFT_RULES_FILE"
+	fi
+
+	if [ $? -ne 0 ]; then
+		logger -t adguardhome "failed to generate nft rules"
+		return 1
+	fi
+
+	if ! nft -c -f "$NFT_RULES_FILE" >/dev/null 2>&1; then
+		logger -t adguardhome "generated nft rules failed validation"
+		return 1
+	fi
+
+	nft delete table inet "$NFT_TABLE" 2>/dev/null
+
+	if ! nft -f "$NFT_RULES_FILE" >/dev/null 2>&1; then
+		logger -t adguardhome "failed to apply nft table $NFT_TABLE"
+		return 1
+	fi
+
+	if ! fw4 reload >/dev/null 2>&1; then
+		logger -t adguardhome \
+			"fw4 reload failed after applying nft table $NFT_TABLE"
+		return 1
+	fi
+
+	if ! nft list table inet "$NFT_TABLE" >/dev/null 2>&1; then
+		logger -t adguardhome \
+			"nft table $NFT_TABLE missing after fw4 reload"
+		return 1
+	fi
+
+	logger -t adguardhome \
+		"nft table $NFT_TABLE applied on port $port, WAN excludes: ${wan_nft_set:-none}"
+
+	return 0
 }
 
 
 clear_nft_redirect() {
-    if nft list table inet "$NFT_TABLE" >/dev/null 2>&1; then
-        [ -f "$NFT_RULES_FILE" ] && > "$NFT_RULES_FILE"
+	if ! nft list table inet "$NFT_TABLE" >/dev/null 2>&1; then
+		[ -f "$NFT_RULES_FILE" ] && > "$NFT_RULES_FILE"
+		return 0
+	fi
 
-        nft delete table inet "$NFT_TABLE" 2>/dev/null
-        fw4 reload >/dev/null 2>&1
+	if ! nft delete table inet "$NFT_TABLE" 2>/dev/null; then
+		logger -t adguardhome "failed to clear nft table $NFT_TABLE"
+		return 1
+	fi
 
-        logger -t adguardhome "nft table $NFT_TABLE cleared"
-    fi
+	[ -f "$NFT_RULES_FILE" ] && > "$NFT_RULES_FILE"
+
+	if ! fw4 reload >/dev/null 2>&1; then
+		logger -t adguardhome \
+			"fw4 reload failed while clearing nft table $NFT_TABLE"
+		return 1
+	fi
+
+	if nft list table inet "$NFT_TABLE" >/dev/null 2>&1; then
+		logger -t adguardhome \
+			"nft table $NFT_TABLE still exists after clear"
+		return 1
+	fi
+
+	logger -t adguardhome "nft table $NFT_TABLE cleared"
+	return 0
 }
 
 
-# ---------------------------------------------------------------------------
 # Persistent dnsmasq state
-# ---------------------------------------------------------------------------
 
 dnsmasq_state_save() {
-    local configpath="$1"
-    local mode="$2"
-    local agh_port="$3"
+	local configpath="$1" mode="$2" agh_port="$3"
+	local server_values value resolvfile noresolv dnsmasq_port
 
-    local server_values
-    local value
-    local resolvfile
-    local noresolv
-    local dnsmasq_port
+	[ -f "$DNSMASQ_STATE_FILE" ] && return 0
 
-    # Existing backup always wins.
-    [ -f "$DNSMASQ_STATE_FILE" ] && return 0
+	mkdir -p "$DNSMASQ_STATE_DIR" || {
+		logger -t adguardhome "failed to create dnsmasq state directory"
+		return 1
+	}
 
-    mkdir -p "$DNSMASQ_STATE_DIR" || {
-        logger -t adguardhome "failed to create dnsmasq state directory"
-        return 1
-    }
+	chmod 0700 "$DNSMASQ_STATE_DIR"
 
-    chmod 0700 "$DNSMASQ_STATE_DIR"
+	{
+		printf 'version=1\n'
+		printf 'mode=%s\n' "$mode"
 
-    {
-        printf 'version=1\n'
-        printf 'mode=%s\n' "$mode"
+		if uci -q get dhcp.@dnsmasq[0].server >/dev/null 2>&1; then
+			printf 'server_exists=1\n'
+			server_values="$(
+				uci -q get dhcp.@dnsmasq[0].server 2>/dev/null
+			)"
 
-        # ---------------------------------------------------------------
-        # Original dnsmasq server list
-        # ---------------------------------------------------------------
+			for value in $server_values; do
+				[ -n "$value" ] || continue
+				printf 'server_item=%s\n' "$value"
+			done
+		else
+			printf 'server_exists=0\n'
+		fi
 
-        if uci -q get dhcp.@dnsmasq[0].server >/dev/null 2>&1; then
-            printf 'server_exists=1\n'
+		if resolvfile="$(uci -q get dhcp.@dnsmasq[0].resolvfile 2>/dev/null)"; then
+			printf 'resolvfile_exists=1\n'
+			printf 'resolvfile=%s\n' "$resolvfile"
+		else
+			printf 'resolvfile_exists=0\n'
+		fi
 
-            server_values="$(
-                uci -q get dhcp.@dnsmasq[0].server 2>/dev/null
-            )"
+		if noresolv="$(uci -q get dhcp.@dnsmasq[0].noresolv 2>/dev/null)"; then
+			printf 'noresolv_exists=1\n'
+			printf 'noresolv=%s\n' "$noresolv"
+		else
+			printf 'noresolv_exists=0\n'
+		fi
 
-            # Keep the original upstream servers while placing AGH first.
-            for value in $server_values; do
-                [ -n "$value" ] || continue
-                printf 'server_item=%s\n' "$value"
-            done
-        else
-            printf 'server_exists=0\n'
-        fi
+		if dnsmasq_port="$(uci -q get dhcp.@dnsmasq[0].port 2>/dev/null)"; then
+			printf 'dnsmasq_port_exists=1\n'
+			printf 'dnsmasq_port=%s\n' "$dnsmasq_port"
+		else
+			printf 'dnsmasq_port_exists=0\n'
+		fi
 
-        # ---------------------------------------------------------------
-        # Original resolvfile
-        # ---------------------------------------------------------------
+		printf 'agh_port=%s\n' "$agh_port"
+	} > "${DNSMASQ_STATE_FILE}.tmp" || {
+		rm -f "${DNSMASQ_STATE_FILE}.tmp"
+		return 1
+	}
 
-        if resolvfile="$(uci -q get dhcp.@dnsmasq[0].resolvfile 2>/dev/null)"; then
-            printf 'resolvfile_exists=1\n'
-            printf 'resolvfile=%s\n' "$resolvfile"
-        else
-            printf 'resolvfile_exists=0\n'
-        fi
+	chmod 0600 "${DNSMASQ_STATE_FILE}.tmp"
 
-        # ---------------------------------------------------------------
-        # Original noresolv
-        # ---------------------------------------------------------------
+	mv -f "${DNSMASQ_STATE_FILE}.tmp" "$DNSMASQ_STATE_FILE" || {
+		rm -f "${DNSMASQ_STATE_FILE}.tmp"
+		return 1
+	}
 
-        if noresolv="$(uci -q get dhcp.@dnsmasq[0].noresolv 2>/dev/null)"; then
-            printf 'noresolv_exists=1\n'
-            printf 'noresolv=%s\n' "$noresolv"
-        else
-            printf 'noresolv_exists=0\n'
-        fi
+	logger -t adguardhome \
+		"saved original dnsmasq configuration, mode=$mode"
 
-        # ---------------------------------------------------------------
-        # Original dnsmasq port
-        # ---------------------------------------------------------------
-
-        if dnsmasq_port="$(uci -q get dhcp.@dnsmasq[0].port 2>/dev/null)"; then
-            printf 'dnsmasq_port_exists=1\n'
-            printf 'dnsmasq_port=%s\n' "$dnsmasq_port"
-        else
-            printf 'dnsmasq_port_exists=0\n'
-        fi
-
-        # ---------------------------------------------------------------
-        # Original AdGuard Home DNS port
-        # ---------------------------------------------------------------
-
-        # The caller passes this value BEFORE AGH is modified.
-        printf 'agh_port=%s\n' "$agh_port"
-
-    } > "${DNSMASQ_STATE_FILE}.tmp" || {
-        rm -f "${DNSMASQ_STATE_FILE}.tmp"
-        return 1
-    }
-
-    chmod 0600 "${DNSMASQ_STATE_FILE}.tmp"
-
-    mv -f "${DNSMASQ_STATE_FILE}.tmp" "$DNSMASQ_STATE_FILE" || {
-        rm -f "${DNSMASQ_STATE_FILE}.tmp"
-        return 1
-    }
-
-    logger -t adguardhome \
-        "saved original dnsmasq configuration, mode=$mode"
-
-    return 0
+	return 0
 }
 
 
 dnsmasq_state_mode() {
-    [ -f "$DNSMASQ_STATE_FILE" ] || return 1
-
-    sed -n 's/^mode=//p' "$DNSMASQ_STATE_FILE" |
-        head -n 1
+	[ -f "$DNSMASQ_STATE_FILE" ] || return 1
+	sed -n 's/^mode=//p' "$DNSMASQ_STATE_FILE" | head -n 1
 }
 
 
 dnsmasq_state_restore() {
-    local configpath="$1"
+	local configpath="$1"
+	local old_mode server_exists resolvfile_exists noresolv_exists dnsmasq_port_exists
+	local resolvfile noresolv dnsmasq_port agh_port value
 
-    local old_mode
-    local server_exists
-    local resolvfile_exists
-    local noresolv_exists
-    local dnsmasq_port_exists
+	[ -f "$DNSMASQ_STATE_FILE" ] || return 0
 
-    local resolvfile
-    local noresolv
-    local dnsmasq_port
-    local agh_port
-    local value
+	old_mode="$(
+		sed -n 's/^mode=//p' "$DNSMASQ_STATE_FILE" |
+			head -n 1
+	)"
 
-    [ -f "$DNSMASQ_STATE_FILE" ] || return 0
+	server_exists="$(
+		sed -n 's/^server_exists=//p' "$DNSMASQ_STATE_FILE" |
+			head -n 1
+	)"
 
-    old_mode="$(
-        sed -n 's/^mode=//p' "$DNSMASQ_STATE_FILE" |
-            head -n 1
-    )"
+	resolvfile_exists="$(
+		sed -n 's/^resolvfile_exists=//p' "$DNSMASQ_STATE_FILE" |
+			head -n 1
+	)"
 
-    server_exists="$(
-        sed -n 's/^server_exists=//p' "$DNSMASQ_STATE_FILE" |
-            head -n 1
-    )"
+	noresolv_exists="$(
+		sed -n 's/^noresolv_exists=//p' "$DNSMASQ_STATE_FILE" |
+			head -n 1
+	)"
 
-    resolvfile_exists="$(
-        sed -n 's/^resolvfile_exists=//p' "$DNSMASQ_STATE_FILE" |
-            head -n 1
-    )"
+	dnsmasq_port_exists="$(
+		sed -n 's/^dnsmasq_port_exists=//p' "$DNSMASQ_STATE_FILE" |
+			head -n 1
+	)"
 
-    noresolv_exists="$(
-        sed -n 's/^noresolv_exists=//p' "$DNSMASQ_STATE_FILE" |
-            head -n 1
-    )"
+	agh_port="$(
+		sed -n 's/^agh_port=//p' "$DNSMASQ_STATE_FILE" |
+			head -n 1
+	)"
 
-    dnsmasq_port_exists="$(
-        sed -n 's/^dnsmasq_port_exists=//p' "$DNSMASQ_STATE_FILE" |
-            head -n 1
-    )"
+	uci -q delete dhcp.@dnsmasq[0].server
 
-    agh_port="$(
-        sed -n 's/^agh_port=//p' "$DNSMASQ_STATE_FILE" |
-            head -n 1
-    )"
+	if [ "$server_exists" = "1" ]; then
+		sed -n 's/^server_item=//p' "$DNSMASQ_STATE_FILE" |
+			while IFS= read -r value; do
+				[ -n "$value" ] || continue
+				uci add_list dhcp.@dnsmasq[0].server="$value"
+			done
+	fi
 
-    # ---------------------------------------------------------------
-    # Restore original server list
-    # ---------------------------------------------------------------
+	uci -q delete dhcp.@dnsmasq[0].resolvfile
 
-    uci -q delete dhcp.@dnsmasq[0].server
+	if [ "$resolvfile_exists" = "1" ]; then
+		resolvfile="$(
+			sed -n 's/^resolvfile=//p' "$DNSMASQ_STATE_FILE" |
+				head -n 1
+		)"
 
-    if [ "$server_exists" = "1" ]; then
-        sed -n 's/^server_item=//p' "$DNSMASQ_STATE_FILE" |
-        while IFS= read -r value; do
-            [ -n "$value" ] || continue
-            uci add_list dhcp.@dnsmasq[0].server="$value"
-        done
-    fi
+		uci set dhcp.@dnsmasq[0].resolvfile="$resolvfile"
+	fi
 
-    # ---------------------------------------------------------------
-    # Restore resolvfile
-    # ---------------------------------------------------------------
+	uci -q delete dhcp.@dnsmasq[0].noresolv
 
-    uci -q delete dhcp.@dnsmasq[0].resolvfile
+	if [ "$noresolv_exists" = "1" ]; then
+		noresolv="$(
+			sed -n 's/^noresolv=//p' "$DNSMASQ_STATE_FILE" |
+				head -n 1
+		)"
 
-    if [ "$resolvfile_exists" = "1" ]; then
-        resolvfile="$(
-            sed -n 's/^resolvfile=//p' "$DNSMASQ_STATE_FILE" |
-                head -n 1
-        )"
+		uci set dhcp.@dnsmasq[0].noresolv="$noresolv"
+	fi
 
-        uci set dhcp.@dnsmasq[0].resolvfile="$resolvfile"
-    fi
+	uci -q delete dhcp.@dnsmasq[0].port
 
-    # ---------------------------------------------------------------
-    # Restore noresolv
-    # ---------------------------------------------------------------
+	if [ "$dnsmasq_port_exists" = "1" ]; then
+		dnsmasq_port="$(
+			sed -n 's/^dnsmasq_port=//p' "$DNSMASQ_STATE_FILE" |
+				head -n 1
+		)"
 
-    uci -q delete dhcp.@dnsmasq[0].noresolv
+		uci set dhcp.@dnsmasq[0].port="$dnsmasq_port"
+	fi
 
-    if [ "$noresolv_exists" = "1" ]; then
-        noresolv="$(
-            sed -n 's/^noresolv=//p' "$DNSMASQ_STATE_FILE" |
-                head -n 1
-        )"
+	uci commit dhcp
 
-        uci set dhcp.@dnsmasq[0].noresolv="$noresolv"
-    fi
+	if [ "$old_mode" = "exchange" ] &&
+		[ -n "$agh_port" ] &&
+		[ -f "$configpath" ]; then
+		config_editor 'dns.port' "$agh_port" "$configpath"
+	fi
 
-    # ---------------------------------------------------------------
-    # Restore dnsmasq port
-    # ---------------------------------------------------------------
+	/etc/init.d/dnsmasq reload >/dev/null 2>&1
+	agh_reload
 
-    uci -q delete dhcp.@dnsmasq[0].port
+	rm -f "$DNSMASQ_STATE_FILE"
 
-    if [ "$dnsmasq_port_exists" = "1" ]; then
-        dnsmasq_port="$(
-            sed -n 's/^dnsmasq_port=//p' "$DNSMASQ_STATE_FILE" |
-                head -n 1
-        )"
-
-        uci set dhcp.@dnsmasq[0].port="$dnsmasq_port"
-    fi
-
-    uci commit dhcp
-
-    # ---------------------------------------------------------------
-    # Restore AGH DNS port only for exchange mode
-    # ---------------------------------------------------------------
-
-    if [ "$old_mode" = "exchange" ] &&
-        [ -n "$agh_port" ] &&
-        [ -f "$configpath" ]; then
-
-        config_editor 'dns.port' "$agh_port" "$configpath"
-    fi
-
-    /etc/init.d/dnsmasq reload >/dev/null 2>&1
-    agh_reload
-
-    rm -f "$DNSMASQ_STATE_FILE"
-
-    logger -t adguardhome "restored original dnsmasq configuration"
+	logger -t adguardhome "restored original dnsmasq configuration"
 }
 
 
-# ---------------------------------------------------------------------------
 # dnsmasq upstream mode
-# ---------------------------------------------------------------------------
 
 set_forward_dnsmasq() {
-    local port="$1"
-    local configpath="$2"
+	local port="$1" configpath="$2"
+	local addr="127.0.0.1#$port" old_server server
 
-    local addr="127.0.0.1#$port"
-    local old_server
-    local server
+	old_server="$(
+		uci -q get dhcp.@dnsmasq[0].server 2>/dev/null
+	)"
 
-    old_server="$(
-        uci -q get dhcp.@dnsmasq[0].server 2>/dev/null
-    )"
+	echo "$old_server" |
+		grep -q -E "(^|[[:space:]])${addr}([[:space:]]|$)" &&
+		return 0
 
-    # Already using AGH as an upstream server.
-    echo "$old_server" |
-        grep -q -E "(^|[[:space:]])${addr}([[:space:]]|$)" &&
-        return 0
+	dnsmasq_state_save \
+		"$configpath" \
+		'dnsmasq-upstream' \
+		"$port" || {
+		logger -t adguardhome \
+			"failed to save original dnsmasq configuration"
+		return 1
+	}
 
-    # Save the user's original configuration before taking over.
-    dnsmasq_state_save \
-        "$configpath" \
-        'dnsmasq-upstream' \
-        "$port" || {
-        logger -t adguardhome "failed to save original dnsmasq configuration"
-        return 1
-    }
+	uci -q delete dhcp.@dnsmasq[0].server
+	uci add_list dhcp.@dnsmasq[0].server="$addr"
 
-    # Follow rufengsuixing's upstream behavior:
-    # AGH is placed first while existing upstream servers are retained.
-    uci -q delete dhcp.@dnsmasq[0].server
-    uci add_list dhcp.@dnsmasq[0].server="$addr"
+	for server in $old_server; do
+		[ -n "$server" ] || continue
+		[ "$server" = "$addr" ] && continue
+		uci add_list dhcp.@dnsmasq[0].server="$server"
+	done
 
-    for server in $old_server; do
-        [ -n "$server" ] || continue
-        [ "$server" = "$addr" ] && continue
-        uci add_list dhcp.@dnsmasq[0].server="$server"
-    done
+	uci -q delete dhcp.@dnsmasq[0].resolvfile
+	uci set dhcp.@dnsmasq[0].noresolv=1
+	uci commit dhcp
 
-    uci -q delete dhcp.@dnsmasq[0].resolvfile
-    uci set dhcp.@dnsmasq[0].noresolv=1
-    uci commit dhcp
-
-    /etc/init.d/dnsmasq reload >/dev/null 2>&1
+	/etc/init.d/dnsmasq reload >/dev/null 2>&1
 }
 
 
-# ---------------------------------------------------------------------------
 # Exchange AGH and dnsmasq port 53
-# ---------------------------------------------------------------------------
 
 use_port53() {
-    local configpath
-    local adguardhome_port
-    local dnsmasq_port
-    local original_agh_port
+	local configpath adguardhome_port dnsmasq_port original_agh_port
 
-    configpath="$(uci -q get adguardhome.config.config_file)"
-    [ -n "$configpath" ] ||
-        configpath='/etc/adguardhome/adguardhome.yaml'
+	configpath="$(uci -q get adguardhome.config.config_file)"
+	[ -n "$configpath" ] ||
+		configpath='/etc/adguardhome/adguardhome.yaml'
 
-    adguardhome_port="$(
-        config_editor 'dns.port' '' "$configpath" '1'
-    )"
+	adguardhome_port="$(
+		config_editor 'dns.port' '' "$configpath" '1'
+	)"
 
-    [ -n "$adguardhome_port" ] ||
-        adguardhome_port='53'
+	[ -n "$adguardhome_port" ] ||
+		adguardhome_port='53'
 
-    dnsmasq_port="$(
-        uci -q get dhcp.@dnsmasq[0].port
-    )"
+	dnsmasq_port="$(
+		uci -q get dhcp.@dnsmasq[0].port
+	)"
 
-    [ -n "$dnsmasq_port" ] ||
-        dnsmasq_port='53'
+	[ -n "$dnsmasq_port" ] ||
+		dnsmasq_port='53'
 
-    # Already in exchange state:
-    # AGH owns 53 and dnsmasq owns a non-53 port.
-    if [ "$adguardhome_port" = '53' ] &&
-        [ "$dnsmasq_port" != '53' ]; then
-        return 0
-    fi
+	if [ "$adguardhome_port" = '53' ] &&
+		[ "$dnsmasq_port" != '53' ]; then
+		return 0
+	fi
 
-    original_agh_port="$adguardhome_port"
+	original_agh_port="$adguardhome_port"
 
-    # Save the complete pre-exchange state BEFORE modifying either side.
-    dnsmasq_state_save \
-        "$configpath" \
-        'exchange' \
-        "$original_agh_port" || {
-        logger -t adguardhome \
-            "failed to save original dnsmasq configuration for exchange mode"
-        return 1
-    }
+	dnsmasq_state_save \
+		"$configpath" \
+		'exchange' \
+		"$original_agh_port" || {
+		logger -t adguardhome \
+			"failed to save original dnsmasq configuration for exchange mode"
+		return 1
+	}
 
-    if [ "$dnsmasq_port" = "$adguardhome_port" ]; then
-        if [ "$adguardhome_port" = '53' ]; then
-            adguardhome_port='1745'
-        fi
-    elif [ "$adguardhome_port" = '53' ]; then
-        return 0
-    fi
+	if [ "$dnsmasq_port" = "$adguardhome_port" ]; then
+		if [ "$adguardhome_port" = '53' ]; then
+			adguardhome_port='1745'
+		fi
+	elif [ "$adguardhome_port" = '53' ]; then
+		return 0
+	fi
 
-    # AGH gets port 53.
-    config_editor 'dns.port' '53' "$configpath"
+	config_editor 'dns.port' '53' "$configpath"
 
-    # dnsmasq gets the original AGH port.
-    uci set dhcp.@dnsmasq[0].port="$adguardhome_port"
-    uci commit dhcp
+	uci set dhcp.@dnsmasq[0].port="$adguardhome_port"
+	uci commit dhcp
 
-    /etc/init.d/dnsmasq reload >/dev/null 2>&1
-    agh_reload
+	/etc/init.d/dnsmasq reload >/dev/null 2>&1
+	agh_reload
 }
 
 
-# ---------------------------------------------------------------------------
 # ubus reload helper
-# ---------------------------------------------------------------------------
 
 agh_reload() {
-    ubus call service event \
-        '{"type":"config.change","data":{"package":"adguardhome"}}' \
-        >/dev/null 2>&1
+	ubus call service event \
+		'{"type":"config.change","data":{"package":"adguardhome"}}' \
+		>/dev/null 2>&1
 }
 
 
-# ---------------------------------------------------------------------------
 # Redirect state indicator
-# ---------------------------------------------------------------------------
 
 mark_redirect_flag() {
-    local enabled="$1"
-    local redirect="$2"
-    local agh_port="$3"
+	local enabled="$1" redirect="$2" agh_port="$3" configpath flag=0
 
-    local configpath
-    local flag=0
+	configpath="$(uci -q get adguardhome.config.config_file)"
+	[ -n "$configpath" ] ||
+		configpath='/etc/adguardhome/adguardhome.yaml'
 
-    configpath="$(uci -q get adguardhome.config.config_file)"
-    [ -n "$configpath" ] ||
-        configpath='/etc/adguardhome/adguardhome.yaml'
+	case "$agh_port" in
+		''|*[!0-9]*)
+			agh_port='0'
+			;;
+	esac
 
-    [ -n "$agh_port" ] || agh_port='5353'
+	if [ "$enabled" = '1' ] &&
+		[ "$redirect" != 'none' ]; then
 
-    if [ "$enabled" = '1' ] &&
-        [ "$redirect" != 'none' ]; then
+		flag=1
 
-        flag=1
+		if [ "$redirect" = 'redirect' ]; then
+			local nft_rules
 
-        if [ "$redirect" = 'redirect' ]; then
+			nft_rules="$(
+				nft list chain inet "$NFT_TABLE" prerouting 2>/dev/null
+			)"
 
-            nft list table inet "$NFT_TABLE" \
-                >/dev/null 2>&1 ||
-                flag=0
+			echo "$nft_rules" |
+				grep -q "udp dport 53 redirect to :${agh_port}" ||
+				flag=0
 
-        elif [ "$redirect" = 'dnsmasq-upstream' ]; then
+			echo "$nft_rules" |
+				grep -q "tcp dport 53 redirect to :${agh_port}" ||
+				flag=0
 
-            local server_values
+		elif [ "$redirect" = 'dnsmasq-upstream' ]; then
+			local server_values
 
-            server_values="$(
-                uci -q get dhcp.@dnsmasq[0].server 2>/dev/null
-            )"
+			server_values="$(
+				uci -q get dhcp.@dnsmasq[0].server 2>/dev/null
+			)"
 
-            echo "$server_values" |
-                grep -q -E \
-                    "(^|[[:space:]])127\\.0\\.0\\.1#${agh_port}([[:space:]]|$)" ||
-                flag=0
+			echo "$server_values" |
+				grep -q -E \
+					"(^|[[:space:]])127\\.0\\.0\\.1#${agh_port}([[:space:]]|$)" ||
+				flag=0
 
-        elif [ "$redirect" = 'exchange' ]; then
+		elif [ "$redirect" = 'exchange' ]; then
+			local cfgp dport
 
-            local cfgp
-            local dport
+			cfgp="$(
+				config_editor 'dns.port' '' "$configpath" '1'
+			)"
 
-            cfgp="$(
-                config_editor 'dns.port' '' "$configpath" '1'
-            )"
+			dport="$(
+				uci -q get dhcp.@dnsmasq[0].port 2>/dev/null
+			)"
 
-            dport="$(
-                uci -q get dhcp.@dnsmasq[0].port 2>/dev/null
-            )"
+			if [ "$cfgp" != '53' ] ||
+				[ "$dport" = '53' ]; then
+				flag=0
+			fi
+		fi
+	fi
 
-            if [ "$cfgp" != '53' ] ||
-                [ "$dport" = '53' ]; then
-                flag=0
-            fi
-        fi
-    fi
-
-    printf '%s' "$flag" > /var/run/AdGredir
+	printf '%s' "$flag" > /var/run/AdGredir
 }
 
 
-# ---------------------------------------------------------------------------
 # Main controller
-# ---------------------------------------------------------------------------
 
 _do_redirect() {
-    local enabled="$1"
+	local enabled="$1"
+	local configpath config_agh_port current_dnsmasq_port redirect
+	local old_redirect='none' old_port='0' old_enabled='0' saved_mode
 
-    local configpath
-    local config_agh_port
-    local current_dnsmasq_port
-    local redirect
+	configpath="$(uci -q get adguardhome.config.config_file)"
+	[ -n "$configpath" ] ||
+		configpath='/etc/adguardhome/adguardhome.yaml'
 
-    local old_redirect='none'
-    local old_port='0'
-    local old_enabled='0'
+	config_agh_port="$(
+		config_editor 'dns.port' '' "$configpath" '1'
+	)"
 
-    local saved_mode
+	[ -n "$config_agh_port" ] ||
+		config_agh_port='0'
 
-    configpath="$(uci -q get adguardhome.config.config_file)"
-    [ -n "$configpath" ] ||
-        configpath='/etc/adguardhome/adguardhome.yaml'
+	current_dnsmasq_port="$(
+		uci -q get dhcp.@dnsmasq[0].port
+	)"
 
-    # Current AGH port from the actual YAML configuration.
-    config_agh_port="$(
-        config_editor 'dns.port' '' "$configpath" '1'
-    )"
+	[ -n "$current_dnsmasq_port" ] ||
+		current_dnsmasq_port='53'
 
-    [ -n "$config_agh_port" ] ||
-        config_agh_port='0'
+	redirect="$(
+		uci -q get adguardhome.config.redirect
+	)"
 
-    # Current dnsmasq port from UCI.
-    current_dnsmasq_port="$(
-        uci -q get dhcp.@dnsmasq[0].port
-    )"
+	[ -n "$redirect" ] ||
+		redirect='none'
 
-    [ -n "$current_dnsmasq_port" ] ||
-        current_dnsmasq_port='53'
+	if [ -f "$RUNTIME_STATE_FILE" ]; then
+		old_redirect="$(
+			sed -n 's/^old_redirect=//p' "$RUNTIME_STATE_FILE" |
+				tr -d '"'
+		)"
 
-    redirect="$(
-        uci -q get adguardhome.config.redirect
-    )"
+		old_port="$(
+			sed -n 's/^old_port=//p' "$RUNTIME_STATE_FILE" |
+				tr -d '"'
+		)"
 
-    [ -n "$redirect" ] ||
-        redirect='none'
+		old_enabled="$(
+			sed -n 's/^old_enabled=//p' "$RUNTIME_STATE_FILE" |
+				tr -d '"'
+		)"
+	fi
 
-    # Load the last runtime state.
-    if [ -f "$RUNTIME_STATE_FILE" ]; then
-        old_redirect="$(
-            sed -n 's/^old_redirect=//p' "$RUNTIME_STATE_FILE" |
-                tr -d '"'
-        )"
+	if [ -z "$current_dnsmasq_port" ]; then
+		current_dnsmasq_port='53'
+		uci set dhcp.@dnsmasq[0].port='53'
+		uci commit dhcp
+	fi
 
-        old_port="$(
-            sed -n 's/^old_port=//p' "$RUNTIME_STATE_FILE" |
-                tr -d '"'
-        )"
+	if [ -f "$DNSMASQ_STATE_FILE" ]; then
+		saved_mode="$(dnsmasq_state_mode)"
 
-        old_enabled="$(
-            sed -n 's/^old_enabled=//p' "$RUNTIME_STATE_FILE" |
-                tr -d '"'
-        )"
-    fi
+		if [ "$enabled" = '0' ]; then
+			dnsmasq_state_restore "$configpath"
 
-    # Ensure dnsmasq has an explicit port before exchange mode.
-    if [ -z "$current_dnsmasq_port" ]; then
-        current_dnsmasq_port='53'
-        uci set dhcp.@dnsmasq[0].port='53'
-        uci commit dhcp
-    fi
+		elif [ "$redirect" = 'dnsmasq-upstream' ]; then
+			if [ "$saved_mode" != "$redirect" ]; then
+				dnsmasq_state_restore "$configpath"
+			fi
 
-    # -----------------------------------------------------------------------
-    # Restore an existing dnsmasq takeover before applying a different mode.
-    #
-    # config_agh_port is never overwritten with the dnsmasq port.
-    # -----------------------------------------------------------------------
+		elif [ "$redirect" = 'exchange' ]; then
+			if [ "$saved_mode" != "$redirect" ]; then
+				dnsmasq_state_restore "$configpath"
+			elif [ "$old_enabled" = '1' ] &&
+				[ "$old_redirect" = 'exchange' ] &&
+				[ "$config_agh_port" != '53' ]; then
+				dnsmasq_state_restore "$configpath"
+			fi
 
-    if [ -f "$DNSMASQ_STATE_FILE" ]; then
-        saved_mode="$(dnsmasq_state_mode)"
+		else
+			dnsmasq_state_restore "$configpath"
+		fi
+	fi
 
-        if [ "$enabled" = '0' ]; then
+	current_dnsmasq_port="$(
+		uci -q get dhcp.@dnsmasq[0].port
+	)"
 
-            dnsmasq_state_restore "$configpath"
+	[ -n "$current_dnsmasq_port" ] ||
+		current_dnsmasq_port='53'
 
-        elif [ "$redirect" = 'dnsmasq-upstream' ]; then
+	if [ "$old_enabled" = '1' ] &&
+		[ "$old_redirect" = 'redirect' ]; then
 
-            if [ "$saved_mode" != "$redirect" ]; then
-                dnsmasq_state_restore "$configpath"
-            fi
+		if [ "$enabled" = '0' ]; then
+			if ! clear_nft_redirect; then
+				logger -t adguardhome \
+					"failed to clear previous redirect rules"
+				return 1
+			fi
+		elif [ "$redirect" != 'redirect' ]; then
+			if ! clear_nft_redirect; then
+				logger -t adguardhome \
+					"failed to clear previous redirect rules"
+				return 1
+			fi
+		elif [ "$old_port" != "$config_agh_port" ]; then
+			if ! clear_nft_redirect; then
+				logger -t adguardhome \
+					"failed to clear previous redirect rules"
+				return 1
+			fi
+		fi
+	fi
 
-        elif [ "$redirect" = 'exchange' ]; then
+	if [ "$enabled" = '0' ]; then
+		printf '0' > /var/run/AdGredir
+		rm -f "$RUNTIME_STATE_FILE"
+		return 0
+	fi
 
-            if [ "$saved_mode" != "$redirect" ]; then
+	if [ "$redirect" = 'redirect' ]; then
+		if ! set_nft_redirect "$config_agh_port"; then
+			logger -t adguardhome "failed to apply redirect mode"
+			return 1
+		fi
 
-                # Different takeover mode: restore the original state first.
-                dnsmasq_state_restore "$configpath"
+	elif [ "$redirect" = 'dnsmasq-upstream' ]; then
+		if ! set_forward_dnsmasq \
+			"$config_agh_port" \
+			"$configpath"; then
+			logger -t adguardhome \
+				"failed to apply dnsmasq-upstream mode"
+			return 1
+		fi
 
-            elif [ "$old_enabled" = '1' ] &&
-                [ "$old_redirect" = 'exchange' ] &&
-                [ "$config_agh_port" != '53' ]; then
+	elif [ "$redirect" = 'exchange' ]; then
+		current_dnsmasq_port="$(
+			uci -q get dhcp.@dnsmasq[0].port
+		)"
 
-                # Exchange mode should always leave AGH on port 53.
-                #
-                # If the YAML was manually changed while exchange was active,
-                # restore the original snapshot and rebuild exchange.
-                dnsmasq_state_restore "$configpath"
-            fi
+		[ -n "$current_dnsmasq_port" ] ||
+			current_dnsmasq_port='53'
 
-        else
+		if [ "$current_dnsmasq_port" = '53' ]; then
+			if ! use_port53; then
+				logger -t adguardhome "failed to apply exchange mode"
+				return 1
+			fi
+		fi
+	fi
 
-            # Current mode no longer needs dnsmasq takeover.
-            dnsmasq_state_restore "$configpath"
-        fi
-    fi
-
-    # Refresh current dnsmasq port after any possible restore.
-    current_dnsmasq_port="$(
-        uci -q get dhcp.@dnsmasq[0].port
-    )"
-
-    [ -n "$current_dnsmasq_port" ] ||
-        current_dnsmasq_port='53'
-
-    # -----------------------------------------------------------------------
-    # Clean old nft redirect when leaving redirect mode.
-    # -----------------------------------------------------------------------
-
-    if [ "$old_enabled" = '1' ] &&
-        [ "$old_redirect" = 'redirect' ]; then
-
-        if [ "$enabled" = '0' ] ||
-            [ "$redirect" != 'redirect' ] ||
-            [ "$old_port" != "$config_agh_port" ]; then
-
-            clear_nft_redirect
-        fi
-    fi
-
-    # -----------------------------------------------------------------------
-    # Service disabled.
-    # -----------------------------------------------------------------------
-
-    if [ "$enabled" = '0' ]; then
-        printf '0' > /var/run/AdGredir
-        rm -f "$RUNTIME_STATE_FILE"
-        return 0
-    fi
-
-    # -----------------------------------------------------------------------
-    # Apply current mode.
-    # -----------------------------------------------------------------------
-
-    if [ "$redirect" = 'redirect' ]; then
-
-        set_nft_redirect "$config_agh_port"
-
-    elif [ "$redirect" = 'dnsmasq-upstream' ]; then
-
-        set_forward_dnsmasq \
-            "$config_agh_port" \
-            "$configpath"
-
-    elif [ "$redirect" = 'exchange' ]; then
-
-        current_dnsmasq_port="$(
-            uci -q get dhcp.@dnsmasq[0].port
-        )"
-
-        [ -n "$current_dnsmasq_port" ] ||
-            current_dnsmasq_port='53'
-
-        if [ "$current_dnsmasq_port" = '53' ]; then
-            use_port53
-        fi
-    fi
-
-    # -----------------------------------------------------------------------
-    # Save runtime state.
-    # -----------------------------------------------------------------------
-
-    cat > "$RUNTIME_STATE_FILE" <<EOF_STATE
+	cat > "$RUNTIME_STATE_FILE" <<EOF_STATE
 old_redirect="$redirect"
 old_port="$config_agh_port"
 old_enabled="$enabled"
 EOF_STATE
 
-    mark_redirect_flag \
-        "$enabled" \
-        "$redirect" \
-        "$config_agh_port"
+	mark_redirect_flag \
+		"$enabled" \
+		"$redirect" \
+		"$config_agh_port"
+
+	if [ "$redirect" = 'redirect' ] &&
+		[ "$(cat /var/run/AdGredir 2>/dev/null)" != '1' ]; then
+		logger -t adguardhome \
+			"redirect rules were applied but state verification failed"
+		return 1
+	fi
+
+	return 0
 }
 
 
