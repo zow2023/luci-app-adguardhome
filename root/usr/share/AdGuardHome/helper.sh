@@ -1,11 +1,12 @@
 #!/bin/sh
-# Auxiliary functions for reading and writing simple YAML scalar values.
+# Auxiliary functions for reading and writing simple two-level YAML values.
 #
-# Supported path format:
-#   section.key
+# Supported format:
+#   section:
+#     key: value
 #
-# This helper is intentionally limited to the simple scalar YAML structure
-# used by AdGuard Home. It is not intended to be a general YAML parser.
+# This helper is intentionally limited to the simple scalar YAML values
+# used by AdGuard Home. It is not a general-purpose YAML parser.
 
 config_editor() {
     local yaml="$1"
@@ -16,63 +17,68 @@ config_editor() {
     [ -n "$yaml" ] || return 1
     [ -f "$file" ] || return 1
 
-    # Read-only mode.
-    if [ "$ro" = "1" ]; then
-        awk -v yaml="$yaml" '
-            BEGIN {
-                split(yaml, path, ".")
-                depth = length(path)
+    local section
+    local key
 
-                parent_found = (depth == 1)
-                parent_indent = -1
+    case "$yaml" in
+        *.*)
+            section="${yaml%%.*}"
+            key="${yaml#*.}"
+            ;;
+        *)
+            section="$yaml"
+            key=""
+            ;;
+    esac
+
+    [ -n "$section" ] || return 1
+
+    # -----------------------------------------------------------------------
+    # Read mode
+    # -----------------------------------------------------------------------
+
+    if [ "$ro" = "1" ]; then
+        awk \
+            -v section="$section" \
+            -v key="$key" '
+            function trim(s) {
+                sub(/^[[:space:]]+/, "", s)
+                sub(/[[:space:]]+$/, "", s)
+                return s
             }
 
             {
                 line = $0
 
-                # Ignore empty lines and comments.
+                # Ignore blank lines and comments.
                 if (line ~ /^[[:space:]]*$/ ||
                     line ~ /^[[:space:]]*#/) {
                     next
                 }
 
-                # Count leading spaces.
-                indent = length(line) - length(substr(line, match(line, /[^ ]/)))
+                # Top-level section.
+                if (line !~ /^[[:space:]]/) {
+                    current_section = line
+                    sub(/:.*/, "", current_section)
+                    current_section = trim(current_section)
 
-                key = line
-                sub(/^[[:space:]]*/, "", key)
-                sub(/:.*/, "", key)
-
-                # Top-level key.
-                if (indent == 0) {
-                    if (depth == 1 && key == path[1]) {
-                        value = line
-                        sub(/^[^:]*:[[:space:]]*/, "", value)
-                        print value
-                        found = 1
-                        exit
-                    }
-
-                    if (depth > 1 && key == path[1]) {
-                        parent_found = 1
-                        parent_indent = indent
-                        next
-                    }
-
-                    parent_found = 0
+                    in_section = (current_section == section)
                     next
                 }
 
-                # Nested key.
-                if (depth > 1 &&
-                    parent_found &&
-                    indent > parent_indent &&
-                    key == path[depth]) {
+                if (!in_section || key == "")
+                    next
 
-                    value = line
-                    sub(/^[^:]*:[[:space:]]*/, "", value)
+                # Match the requested key inside the section.
+                current_key = line
+                sub(/^[[:space:]]*/, "", current_key)
+                sub(/:.*/, "", current_key)
+                current_key = trim(current_key)
 
-                    print value
+                if (current_key == key) {
+                    result = line
+                    sub(/^[^:]*:[[:space:]]*/, "", result)
+                    print result
                     found = 1
                     exit
                 }
@@ -82,77 +88,70 @@ config_editor() {
                 if (!found)
                     exit 1
             }
-        ' "$file"
+            ' "$file"
 
         return $?
     fi
 
-    # Write mode.
+    # -----------------------------------------------------------------------
+    # Write mode
+    # -----------------------------------------------------------------------
+
+    [ -n "$key" ] || return 1
+
     local tmp
     local mode
 
     tmp="${file}.tmp.$$"
     mode="$(stat -c '%a' "$file" 2>/dev/null)"
 
-    VALUE="$value" awk -v yaml="$yaml" '
-        BEGIN {
-            split(yaml, path, ".")
-            depth = length(path)
-
-            parent_found = (depth == 1)
-            parent_indent = -1
-            found = 0
+    awk \
+        -v section="$section" \
+        -v key="$key" \
+        -v new_value="$value" '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
         }
 
         {
             line = $0
 
-            # Preserve empty lines and comments.
+            # Preserve blank lines and comments.
             if (line ~ /^[[:space:]]*$/ ||
                 line ~ /^[[:space:]]*#/) {
                 print line
                 next
             }
 
-            # Count leading spaces.
-            indent = length(line) - length(substr(line, match(line, /[^ ]/)))
+            # Top-level section.
+            if (line !~ /^[[:space:]]/) {
+                current_section = line
+                sub(/:.*/, "", current_section)
+                current_section = trim(current_section)
 
-            key = line
-            sub(/^[[:space:]]*/, "", key)
-            sub(/:.*/, "", key)
-
-            # Top-level key.
-            if (indent == 0) {
-                if (depth == 1 && key == path[1]) {
-                    prefix = line
-                    sub(/[^:]*:.*/, "", prefix)
-
-                    print prefix key ": " ENVIRON["VALUE"]
-                    found = 1
-                    next
-                }
-
-                if (depth > 1 && key == path[1]) {
-                    parent_found = 1
-                    parent_indent = indent
-                } else {
-                    parent_found = 0
-                }
-
+                in_section = (current_section == section)
                 print line
                 next
             }
 
-            # Nested key.
-            if (depth > 1 &&
-                parent_found &&
-                indent > parent_indent &&
-                key == path[depth]) {
+            if (!in_section) {
+                print line
+                next
+            }
 
-                prefix = line
-                sub(/[^:]*:.*/, "", prefix)
+            # Get indentation and key.
+            indent = line
+            sub(/[^ ].*/, "", indent)
 
-                print prefix key ": " ENVIRON["VALUE"]
+            current_key = line
+            sub(/^[[:space:]]*/, "", current_key)
+            sub(/:.*/, "", current_key)
+            current_key = trim(current_key)
+
+            if (current_key == key) {
+                print indent key ": " new_value
                 found = 1
                 next
             }
@@ -164,7 +163,7 @@ config_editor() {
             if (!found)
                 exit 1
         }
-    ' "$file" > "$tmp"
+        ' "$file" > "$tmp"
 
     if [ $? -ne 0 ]; then
         rm -f "$tmp"
