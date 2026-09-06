@@ -171,6 +171,8 @@ return view.extend({
 				' ' + _('Modify at your own risk.'),
 		);
 
+		mainSect.tab('logs', _('Logs'));
+
 		// ==== Move here: global switch ====
 		const enabledOpt = mainSect.taboption(
 			'general',
@@ -312,6 +314,34 @@ return view.extend({
 		memLimitOpt.placeholder = DEFAULT_GOMEMLIMIT;
 		memLimitOpt.retain = true;
 
+		const logsOpt = mainSect.taboption(
+	        'logs',
+        	form.DummyValue,
+	        '_logs',
+	       _('System Log (AdGuard Home)')
+        );
+
+        logsOpt.rawhtml = true;
+
+        logsOpt.cfgvalue = () => `
+	        <div style="margin-bottom:8px;">
+		        ${_('Showing last 50 lines')}
+	        </div>
+
+	        <textarea
+		        id="agh-syslog"
+		        class="cbi-input-textarea"
+	    	    style="width:100%; min-height:420px; font-family:monospace; font-size:12px;"
+	        	readonly="readonly"
+	        	wrap="off"
+	        ></textarea>
+
+	        <div style="margin-top:8px;">
+	        	${_('Verbose logging')}:
+	     	<strong id="agh-verbose-status"></strong>
+        	</div>
+        `;
+
 		// 💡 1. Extract the real listening address and port directly from YAML
 		let realHttpAddress = '0.0.0.0:3008';
 		if (yamlContent) {
@@ -449,6 +479,44 @@ return view.extend({
 		// ==========================================
 
 		const rendered = await map.render();
+
+		const logArea = rendered.querySelector('#agh-syslog');
+        const verboseStatus = rendered.querySelector('#agh-verbose-status');
+
+        const loadLogs = async () => {
+			try {
+		        const text = await fs.exec_direct('/sbin/logread', [
+	        		'-e',
+	        		'AdGuardHome'
+    		]);
+
+    		const lines = text.trim()
+	    		? text.trim().split(/\n/).reverse().slice(0, 50)
+	    		: [];
+
+    		if (logArea)
+    			logArea.value = lines.join('\n');
+        	} catch (e) {
+    		    console.error(e);
+
+    	    	if (logArea)
+    		    	logArea.value = _('Unable to load log data: ') + e.message;
+    	    }
+        };
+
+        const updateVerboseStatus = () => {
+        	const sections = uci.sections('adguardhome', 'adguardhome');
+        	const verbose = sections.length > 0 && sections[0].verbose === '1';
+
+        	if (verboseStatus)
+        		dom.content(
+         			verboseStatus,
+	        		verbose ? _('Enabled') : _('Disabled')
+        		);
+        };
+
+        loadLogs();
+        updateVerboseStatus();
 
 		const statusNode = map.findElement('data-field', statusOpt.cbid('status_section'));
 		poll.add(updateStatus(statusNode), POLL_INTERVAL);
