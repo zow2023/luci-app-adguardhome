@@ -15,26 +15,37 @@ USE_PROCD=1
 
 EXTRA_COMMANDS="do_redirect force_reload isrunning"
 EXTRA_HELP="\
-\tdo_redirect \t0 or 1\n\
-\tforce_reload\n\
-\tisrunning"
+	do_redirect 	0 or 1
+\
+	force_reload
+\
+	isrunning"
 
 CONTROL_SCRIPT="/usr/share/AdGuardHome/control.sh"
-CRON_FILE=/etc/crontabs/root
+CRON_FILE="/etc/crontabs/root"
+
 
 get_tz() {
 	SET_TZ=""
 	local zonename
+	local tz=""
+
 	zonename="$(uci get system.@system[0].zonename 2>/dev/null)"
 	if [ -n "$zonename" ]; then
 		SET_TZ="$zonename"
 		return
 	fi
+
 	for tzfile in /etc/TZ /var/etc/TZ; do
-		[ -e "$tzfile" ] && tz="$(cat "$tzfile" 2>/dev/null)" && break
+		[ -e "$tzfile" ] &&
+			tz="$(cat "$tzfile" 2>/dev/null)" &&
+			break
 	done
-	[ -n "$tz" ] && SET_TZ=$tz && return
+
+	[ -n "$tz" ] &&
+		SET_TZ="$tz"
 }
+
 
 do_crontab() {
 	local enabled="$1"
@@ -43,47 +54,61 @@ do_crontab() {
 
 	findstr="/usr/share/AdGuardHome/update_core.sh"
 	default="30 3 * * * /usr/share/AdGuardHome/update_core.sh 2>&1"
-	[ "$enabled" = "0" ] || [ "${crontab//autoupdate/}" = "$crontab" ] && cronenable=0 || cronenable=1
+
+	[ "$enabled" = "0" ] ||
+		[ "${crontab//autoupdate/}" = "$crontab" ] &&
+		cronenable=0 ||
+		cronenable=1
+
 	crontab_editor
 
-	[ "$cronreload" -gt 0 ] && /etc/init.d/cron restart
+	[ "$cronreload" -gt 0 ] &&
+		/etc/init.d/cron restart
 }
+
 
 crontab_editor() {
 	local line
-	line="$(grep "$findstr" $CRON_FILE 2>/dev/null)"
+
+	mkdir -p /etc/crontabs
+	touch "$CRON_FILE"
+
+	line="$(grep "$findstr" "$CRON_FILE" 2>/dev/null)"
+
 	if [ "${line:0:1}" != "#" ]; then
 		if [ "$cronenable" -eq 1 ]; then
 			if [ -z "$line" ]; then
-				echo "$default" >> $CRON_FILE
-				cronreload=$((cronreload+1))
+				echo "$default" >> "$CRON_FILE"
+				cronreload=$((cronreload + 1))
 			fi
 		elif [ -n "$line" ]; then
-			sed -i "\,$findstr,d" $CRON_FILE
-			echo "#$line" >> $CRON_FILE
-			cronreload=$((cronreload+1))
+			sed -i "\\,$findstr,d" "$CRON_FILE"
+			echo "#$line" >> "$CRON_FILE"
+			cronreload=$((cronreload + 1))
 		fi
 	else
 		if [ "$cronenable" -eq 1 ]; then
-			sed -i "\,$findstr,d" $CRON_FILE
-			echo "${line:1}" >> $CRON_FILE
-			cronreload=$((cronreload+1))
+			sed -i "\\,$findstr,d" "$CRON_FILE"
+			echo "${line:1}" >> "$CRON_FILE"
+			cronreload=$((cronreload + 1))
 		fi
 	fi
 }
+
 
 boot() {
 	ADGUARDHOME_BOOT=1
 	start "$@"
 }
 
+
 start_service() {
 	mkdir -p /var/etc
-	[ ! -f /var/etc/adguardhome.nft ] && touch /var/etc/adguardhome.nft
+	[ -f /var/etc/adguardhome.nft ] ||
+		touch /var/etc/adguardhome.nft
 	chmod 644 /var/etc/adguardhome.nft
 
 	if [ -n "$ADGUARDHOME_BOOT" ]; then
-		# Do not start yet, wait for triggers
 		return 0
 	fi
 
@@ -114,55 +139,80 @@ start_service() {
 		'redirect:string:none' \
 		'http_address:string'
 
-	# Compatibility with older configs
-	[ -n "$config" ] && config_file="$config"
-	[ -n "$workdir" ] && work_dir="$workdir"
+	# Compatibility with older configs.
+	[ -n "$config" ] &&
+		config_file="$config"
 
-	# Handle hashpass clear text issuance and back brush removal
+	[ -n "$workdir" ] &&
+		work_dir="$workdir"
+
+	# Handle hashpass clear text issuance and back brush removal.
 	if [ -n "$hashpass" ]; then
-		config_editor "users.password" "$hashpass" "$config_file"
+		if ! config_editor "users.password" "$hashpass" "$config_file"; then
+			logger -t adguardhome \
+				"failed to update users.password"
+			return 1
+		fi
+
 		uci set adguardhome."$config_name".hashpass=""
 		uci commit adguardhome
 	fi
 
-	# Synchronize the front-end incing WebUI listening address to YAML
+	# Synchronize front-end WebUI listening address to YAML.
 	if [ -n "$http_address" ]; then
-		config_editor "http.address" "$http_address" "$config_file"
+		if ! config_editor "http.address" "$http_address" "$config_file"; then
+			logger -t adguardhome \
+				"failed to update http.address"
+			return 1
+		fi
+
 		uci set adguardhome."$config_name".http_address=""
 		uci commit adguardhome
 	fi
 
-	# Isse the plan task change
+	# Update scheduled core task.
 	do_crontab "$enabled" "$crontab"
 
-	# If it is not enabled, the linkage cleans up the redirection firewall rules and exits safely.
-	if [ "$enabled" = 0 ]; then
-		$CONTROL_SCRIPT 0
+	# Disabled service: do not start procd instance.
+	if [ "$enabled" = "0" ]; then
 		return 0
 	fi
 
-	if [ "$user" = "adguardhome" ] && ! grep -q "^adguardhome:" /etc/passwd; then
-		echo "luci-app: User 'adguardhome' is missing, injecting UID 853 into system files..." >&2
-		grep -q "^adguardhome:" /etc/group || echo "adguardhome:x:853:" >> /etc/group
-		echo "adguardhome:x:853:853:adguardhome:/var/run/adguardhome:/bin/false" >> /etc/passwd
+	if [ "$user" = "adguardhome" ] &&
+		! grep -q "^adguardhome:" /etc/passwd; then
+
+		echo \
+			"luci-app: User 'adguardhome' is missing, injecting UID 853 into system files..." \
+			>&2
+
+		grep -q "^adguardhome:" /etc/group ||
+			echo "adguardhome:x:853:" >> /etc/group
+
+		echo \
+			"adguardhome:x:853:853:adguardhome:/var/run/adguardhome:/bin/false" \
+			>> /etc/passwd
 	fi
 
 	local config_dir
-	config_dir=$(dirname "$config_file")
-	if [ "$config_dir" = '/etc' ]; then
-		echo 'AdGuard Home config must be stored in its own directory, and not in /etc' >&2
+	config_dir="$(dirname "$config_file")"
+
+	if [ "$config_dir" = "/etc" ]; then
+		echo \
+			"AdGuard Home config must be stored in its own directory, and not in /etc" \
+			>&2
 		return 1
 	fi
+
 	mkdir -m 0700 -p "$config_dir"
 	chown -R "$user":"$group" "$config_dir"
 
 	mkdir -m 0700 -p "$work_dir"
 	chown -R "$user":"$group" "$work_dir"
 
-	# Silently downgrade and call the kernel download script when the kernel is missing.
+	# Download the core when it is missing.
 	if [ ! -f "$PROG" ]; then
-		$CONTROL_SCRIPT 0
-		/usr/share/AdGuardHome/update_core.sh >/tmp/AdGuardHome_update.log 2>&1 &
+		/usr/share/AdGuardHome/update_core.sh \
+			>/tmp/AdGuardHome_update.log 2>&1 &
 		return 0
 	fi
 
@@ -170,18 +220,28 @@ start_service() {
 
 	procd_set_param command "$PROG"
 
-	[ "$gc" -le 0 ] || procd_append_param env GOGC="$gc"
-	[ "$maxprocs" -le 0 ] || procd_append_param env GOMAXPROCS="$maxprocs"
-	[ "$memlimit" -le 0 ] || procd_append_param env GOMEMLIMIT="$memlimit"
+	[ "$gc" -le 0 ] ||
+		procd_append_param env GOGC="$gc"
+
+	[ "$maxprocs" -le 0 ] ||
+		procd_append_param env GOMAXPROCS="$maxprocs"
+
+	[ "$memlimit" -le 0 ] ||
+		procd_append_param env GOMEMLIMIT="$memlimit"
 
 	local SET_TZ
 	get_tz
-	[ -n "$SET_TZ" ] && procd_append_param env TZ="$SET_TZ"
+
+	[ -n "$SET_TZ" ] &&
+		procd_append_param env TZ="$SET_TZ"
 
 	procd_append_param command --config "$config_file"
 	procd_append_param command --logfile syslog
 	# procd_append_param command --no-check-update
-	[ "$verbose" = 1 ] && procd_append_param command --verbose
+
+	[ "$verbose" = "1" ] &&
+		procd_append_param command --verbose
+
 	procd_append_param command --work-dir "$work_dir"
 
 	procd_set_param file /etc/config/adguardhome "$config_file"
@@ -189,7 +249,7 @@ start_service() {
 	procd_set_param stderr 1
 	procd_set_param user "$user"
 	procd_set_param group "$group"
-	procd_set_param capabilities '/etc/capabilities/adguardhome.json'
+	procd_set_param capabilities "/etc/capabilities/adguardhome.json"
 	procd_set_param no_new_privs 1
 	procd_set_param respawn
 
@@ -197,65 +257,126 @@ start_service() {
 	# procfs is needed to readlink /proc/self/exe
 	procd_add_jail adguardhome log procfs
 
-	# config directory must be writable to write new config files
+	# config directory must be writable to write new config files.
 	procd_add_jail_mount_rw "$config_dir"
 	procd_add_jail_mount_rw "$work_dir"
 
-	procd_add_jail_mount '/etc/hosts'
-	procd_add_jail_mount '/etc/ssl/certs'
-	[ -f /etc/TZ ] && procd_add_jail_mount '/etc/TZ'
+	procd_add_jail_mount "/etc/hosts"
+	procd_add_jail_mount "/etc/ssl/certs"
+	[ -f /etc/TZ ] &&
+		procd_add_jail_mount "/etc/TZ"
 
-	config_list_foreach "$config_name" jail_mount procd_add_jail_mount
-	config_list_foreach "$config_name" jail_mount_rw procd_add_jail_mount_rw
+	config_list_foreach "$config_name" jail_mount \
+		procd_add_jail_mount
+
+	config_list_foreach "$config_name" jail_mount_rw \
+		procd_add_jail_mount_rw
 
 	procd_close_instance
-
-	# After the main process is successfully submitted for start-up, it begins to intervene asynchronously and take over the control.
-	if [ -f "$config_file" ]; then
-		($CONTROL_SCRIPT 1) &
-	else
-		$CONTROL_SCRIPT 0
-		if [ "$redirect" != "none" ]; then
-			procd_open_instance "waitconfig"
-			procd_set_param command "/usr/share/AdGuardHome/watchconfig.sh"
-			procd_close_instance
-		fi
-	fi
-
-	(sleep 10 && [ -z "$(pgrep -f "$(basename "$PROG")")" ] && logger -t adguardhome "no process in 10s cancel redirect" && $CONTROL_SCRIPT 0 ) &
 }
 
-stop_service() {
-	config_load 'adguardhome'
-	local config_name='config'
-	local crontab
-	config_get crontab "$config_name" crontab ""
 
-	$CONTROL_SCRIPT 0
-	do_crontab 0 "$crontab"
+service_started() {
+	local i
+
+	# No configuration file means no redirect takeover.
+	[ -f "$(uci -q get adguardhome.config.config_file)" ] ||
+		return 0
+
+	# Wait briefly for the procd-managed process to become visible.
+	for i in 1 2 3 4 5 6 7 8 9 10; do
+		if pgrep -f "$(basename "$PROG")" >/dev/null 2>&1; then
+			if ! "$CONTROL_SCRIPT" 1; then
+				logger -t adguardhome \
+					"failed to apply redirect mode after service start"
+				return 1
+			fi
+
+			return 0
+		fi
+
+		sleep 1
+	done
+
+	logger -t adguardhome \
+		"AdGuard Home process did not start within 10s; redirect not applied"
+
+	return 1
+}
+
+
+service_stopped() {
+	# procd has already killed the managed AdGuardHome instance here.
+	#
+	# This ordering matters for exchange mode: AGH releases port 53 first,
+	# then control.sh restores dnsmasq and the original AGH port.
+	if ! "$CONTROL_SCRIPT" 0; then
+		logger -t adguardhome \
+			"failed to restore redirect state after service stop"
+	fi
+
 	touch /var/run/AdGserverdis
 }
 
-do_redirect() {
-	$CONTROL_SCRIPT "$1"
+
+stop_service() {
+	config_load 'adguardhome'
+
+	local config_name='config'
+	local crontab
+
+	config_get crontab "$config_name" crontab ""
+
+	do_crontab 0 "$crontab"
 }
 
+
+do_redirect() {
+	local enabled="$1"
+
+	if ! "$CONTROL_SCRIPT" "$enabled"; then
+		logger -t adguardhome \
+			"control script failed, requested state=$enabled"
+		return 1
+	fi
+}
+
+
 _isrunning() {
-	[ ! -f "$PROG" ] && return 2
-	pgrep -f "$(basename "$PROG")" >/dev/null 2>&1 && return 0
+	[ ! -f "$PROG" ] &&
+		return 2
+
+	pgrep -f "$(basename "$PROG")" >/dev/null 2>&1 &&
+		return 0
+
 	return 1
 }
+
 
 isrunning() {
 	_isrunning
 	local r=$?
-	[ "$r" = "0" ] && echo "running" || ([ "$r" = "1" ] && echo "not run" || echo "no bin")
-	return $r
+
+	if [ "$r" = "0" ]; then
+		echo "running"
+	elif [ "$r" = "1" ]; then
+		echo "not run"
+	else
+		echo "no bin"
+	fi
+
+	return "$r"
 }
 
+
 force_reload() {
-	_isrunning && procd_send_signal adguardhome || start
+	if _isrunning; then
+		procd_send_signal adguardhome adguardhome HUP
+	else
+		start
+	fi
 }
+
 
 service_triggers() {
 	procd_add_reload_trigger adguardhome
@@ -263,6 +384,9 @@ service_triggers() {
 	if [ -n "$ADGUARDHOME_BOOT" ]; then
 		# Wait for interfaces to be up before starting AdGuard Home for real.
 		# Prevents issues like https://github.com/openwrt/packages/issues/21868.
-		procd_add_raw_trigger 'interface.*.up' 5000 /etc/init.d/adguardhome restart
+		procd_add_raw_trigger \
+			'interface.*.up' \
+			5000 \
+			/etc/init.d/adguardhome restart
 	fi
 }
