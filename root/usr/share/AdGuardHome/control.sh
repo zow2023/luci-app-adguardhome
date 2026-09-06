@@ -657,7 +657,7 @@ _do_redirect() {
     if [ "$enabled" = '0' ]; then
         printf '0' > /var/run/AdGredir
         rm -f "$RUNTIME_STATE_FILE"
-        return 1
+        return 0
     fi
 
     # -----------------------------------------------------------------------
