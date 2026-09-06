@@ -171,3 +171,133 @@ msgstr "取消设置和 100"
 #: applications/luci-app-adguardhome/htdocs/luci-static/resources/view/adguardhome/config.js:232
 msgid "unset and matching the number of CPUs"
 msgstr "取消设置并匹配 CPU 数目"
+
+
+msgid "Enable"
+msgstr "启用"
+
+msgid "Not installed"
+msgstr "未安装"
+
+msgid "Core binary not found. Enable the service to trigger an automatic download."
+msgstr "未找到核心程序。启用服务后将自动下载。"
+
+msgid "Services Settings"
+msgstr "服务设置"
+
+msgid "Settings and operations for updating the AdGuardHome core binary."
+msgstr "用于更新 AdGuard Home 核心程序的设置和操作。"
+
+msgid "WebUI listener (address:port)"
+msgstr "WebUI 监听地址（地址:端口）"
+
+msgid "Bind to specific interface:port (e.g., 0.0.0.0:3008). Leave as 0.0.0.0 to listen on all interfaces."
+msgstr "绑定到指定的接口和端口（例如 0.0.0.0:3008）。使用 0.0.0.0 可监听所有接口。"
+
+msgid "Open AdGuardHome WebUI"
+msgstr "打开 AdGuard Home WebUI"
+
+msgid "Service is disabled. Please go to \"General Settings\" to enable it."
+msgstr "服务已禁用。请前往“通用设置”启用服务。"
+
+msgid "Change password"
+msgstr "修改密码"
+
+msgid "Enter the password here. Click the Load calculate Module button below and go on."
+msgstr "请在此输入密码，然后点击下面的“加载计算模块”按钮继续。"
+
+msgid " ... Load calculate Module ... "
+msgstr "……加载计算模块……"
+
+msgid "Please create a new password."
+msgstr "请创建新密码。"
+
+msgid "Redirect"
+msgstr "重定向"
+
+msgid "AdGuardHome redirect mode"
+msgstr "AdGuard Home 重定向模式"
+
+msgid "No redirect"
+msgstr "不重定向"
+
+msgid "As the upstream server of dnsmasq"
+msgstr "作为 dnsmasq 的上游服务器"
+
+msgid "Redirect port 53 to AdGuardHome"
+msgstr "将 53 端口重定向到 AdGuard Home"
+
+msgid "Use port 53 to replace dnsmasq"
+msgstr "使用 53 端口替代 dnsmasq"
+
+msgid "Core Update"
+msgstr "核心更新"
+
+msgid "Core Branch"
+msgstr "核心版本分支"
+
+msgid "Select the branch for the core binary update."
+msgstr "选择核心程序更新分支。"
+
+msgid "Latest Version"
+msgstr "最新版本"
+
+msgid "Beta Version"
+msgstr "测试版"
+
+msgid "Update URL"
+msgstr "更新地址"
+
+msgid "Select the download link for the core update."
+msgstr "选择核心程序更新的下载地址。"
+
+msgid "Official Mirror (AdTidy - Recommended)"
+msgstr "官方镜像（AdTidy - 推荐）"
+
+msgid "GitHub Releases (Original)"
+msgstr "GitHub Releases（原始来源）"
+
+msgid "Action"
+msgstr "操作"
+
+msgid "Update core version"
+msgstr "更新核心版本"
+
+msgid "Force update"
+msgstr "强制更新"
+
+msgid "Checking..."
+msgstr "检查中……"
+
+msgid "Checking and preparing...\n"
+msgstr "正在检查并准备……\n"
+
+msgid "Updated"
+msgstr "已更新"
+
+msgid "Failed"
+msgstr "失败"
+
+msgid "Already up-to-date"
+msgstr "已经是最新版本"
+
+msgid "Save Failed"
+msgstr "保存失败"
+
+msgid "Loading..."
+msgstr "加载中……"
+
+msgid "Click here to Calculate"
+msgstr "点击此处计算"
+
+msgid " ... Load Error ... "
+msgstr "……加载错误……"
+
+msgid "Calculation already DONE !"
+msgstr "已经完成计算！"
+
+msgid " ... Click Save/Apply ↘️ ... "
+msgstr "……请点击保存/应用 ↘️……"
+
+msgid " ... Nothing inputted yet ... "
+msgstr "……尚未输入任何内容……"
