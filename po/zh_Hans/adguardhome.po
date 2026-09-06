@@ -301,3 +301,21 @@ msgstr "……请点击保存/应用 ↘️……"
 
 msgid " ... Nothing inputted yet ... "
 msgstr "……尚未输入任何内容……"
+
+msgid "Logs"
+msgstr "日志"
+
+msgid "System Log (AdGuard Home)"
+msgstr "系统日志（AdGuard Home）"
+
+msgid "Showing last 50 lines"
+msgstr "显示最近 50 行"
+
+msgid "Unable to load log data: "
+msgstr "无法加载日志数据："
+
+msgid "Enabled"
+msgstr "已启用"
+
+msgid "Disabled"
+msgstr "未启用"
