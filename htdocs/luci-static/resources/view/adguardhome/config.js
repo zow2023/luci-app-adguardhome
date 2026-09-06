@@ -404,7 +404,7 @@ return view.extend({
 			_('Change password'),
 			_('Enter the password here. Click the Load calculate Module button below and go on.') + 
 			'<br /><button class="btn cbi-button cbi-button-apply" type="button" id="btn-agh-calc-hash" style="display:inline-block; margin-top:5px;">' +
-				_(' ... Load calculate Module ... ') + 
+				_('... Load calculate Module ...') + 
 			'</button>'
 		);
 		hashPassOpt.default = '';
@@ -641,7 +641,7 @@ return view.extend({
 						btn.disabled = false;
 					};
 					script.onerror = () => {
-						btn.textContent = _(' ... Load Error ... ');
+						btn.textContent = _('... Load Error ...');
 						btn.disabled = false;
 					};
 					document.head.appendChild(script);
@@ -662,9 +662,9 @@ return view.extend({
 						passInput.dispatchEvent(new Event('input', { bubbles: true }));
 						passInput.dispatchEvent(new Event('change', { bubbles: true }));
 						
-						btn.textContent = _(' ... Click Save/Apply ↘️ ... ');
+						btn.textContent = _('... Click Save/Apply ↘️ ...');
 					} else {
-						btn.textContent = _(' ... Nothing inputted yet ... ');
+						btn.textContent = _('... Nothing inputted yet ...');
 					}
 				}
 			}
