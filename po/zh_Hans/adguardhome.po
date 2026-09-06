@@ -206,7 +206,7 @@ msgstr "修改密码"
 msgid "Enter the password here. Click the Load calculate Module button below and go on."
 msgstr "请在此输入密码，然后点击下面的“加载计算模块”按钮继续。"
 
-msgid " ... Load calculate Module ... "
+msgid "... Load calculate Module ..."
 msgstr "……加载计算模块……"
 
 msgid "Please create a new password."
@@ -290,16 +290,16 @@ msgstr "加载中……"
 msgid "Click here to Calculate"
 msgstr "点击此处计算"
 
-msgid " ... Load Error ... "
+msgid "... Load Error ..."
 msgstr "……加载错误……"
 
 msgid "Calculation already DONE !"
 msgstr "已经完成计算！"
 
-msgid " ... Click Save/Apply ↘️ ... "
+msgid "... Click Save/Apply ↘️ ..."
 msgstr "……请点击保存/应用 ↘️……"
 
-msgid " ... Nothing inputted yet ... "
+msgid "... Nothing inputted yet ..."
 msgstr "……尚未输入任何内容……"
 
 msgid "Logs"
@@ -319,3 +319,24 @@ msgstr "已启用"
 
 msgid "Disabled"
 msgstr "未启用"
+
+msgid "Show the tab and settings for updating the AdGuardHome core binary."
+msgstr "显示用于更新 AdGuardHome 核心二进制文件的标签页和设置。"
+
+msgid "Logs"
+msgstr "日志"
+
+msgid "System Log (AdGuard Home)"
+msgstr "系统日志（AdGuard Home）"
+
+msgid "Showing last 50 lines"
+msgstr "显示最近 50 行"
+
+msgid "Refresh"
+msgstr "刷新"
+
+msgid "Clear Logs"
+msgstr "清理日志"
+
+msgid "Unable to load log data: "
+msgstr "无法加载日志数据："
