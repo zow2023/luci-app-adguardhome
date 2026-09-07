@@ -143,7 +143,7 @@ return view.extend({
 
 		const versionOpt = statusSect.option(form.DummyValue, '_version', _('Version'));
 		versionOpt.cfgvalue = () => version || `<span style="color: var(--error-color-high); font-weight: bold;">${_('Not installed')}</span>`;
-        versionOpt.rawhtml = true;
+		versionOpt.rawhtml = true;
 
 		const statusOpt = statusSect.option(form.DummyValue, '_status', _('Service Status'));
 		statusOpt.rawhtml = true;
@@ -315,32 +315,29 @@ return view.extend({
 		memLimitOpt.retain = true;
 
 		const logsOpt = mainSect.taboption(
-	        'logs',
-        	form.DummyValue,
-	        '_logs',
-	       _('System Log (AdGuard Home)')
-        );
+			'logs',
+			form.DummyValue,
+			'_logs',
+			''
+		);
 
-        logsOpt.rawhtml = true;
-
-        logsOpt.cfgvalue = () => `
-	        <div style="margin-bottom:8px;">
-		        ${_('Showing last 50 lines')}
-	        </div>
-
-	        <textarea
-		        id="agh-syslog"
-		        class="cbi-input-textarea"
-	    	    style="width:100%; min-height:420px; font-family:monospace; font-size:12px;"
-	        	readonly="readonly"
-	        	wrap="off"
-	        ></textarea>
-
-	        <div style="margin-top:8px;">
-	        	${_('Verbose logging')}:
-	     	<strong id="agh-verbose-status"></strong>
-        	</div>
-        `;
+		logsOpt.rawhtml = true;
+		logsOpt.cfgvalue = () => `
+			<div id="agh-log-container" style="width:100%; max-width:none;">
+				<div style="margin-bottom:8px; display:flex; gap:8px; align-items:center;">
+					<button type="button" class="btn cbi-button cbi-button-apply" id="btn-agh-log-refresh">${_('Refresh')}</button>
+					<button type="button" class="btn cbi-button cbi-button-reset" id="btn-agh-log-clear" disabled>${_('Clear Logs')}</button>
+				</div>
+				<div style="margin-bottom:8px;">${_('Showing last 50 lines')}</div>
+				<textarea
+					id="agh-syslog"
+					class="cbi-input-textarea"
+					style="width:100%; max-width:none; height:420px; min-height:420px; box-sizing:border-box; font-family:monospace; font-size:12px; white-space:pre; overflow:auto; resize:vertical;"
+					readonly="readonly"
+					wrap="off"
+				></textarea>
+			</div>
+		`;
 
 		// 💡 1. Extract the real listening address and port directly from YAML
 		let realHttpAddress = '0.0.0.0:3008';
@@ -480,43 +477,78 @@ return view.extend({
 
 		const rendered = await map.render();
 
+		const logContainer = rendered.querySelector('#agh-log-container');
+		if (logContainer) {
+			const logField = logContainer.closest('.cbi-value-field');
+			const logRow = logContainer.closest('.cbi-value');
+			const logTitle = logRow?.querySelector('.cbi-value-title');
+
+			if (logRow) {
+				logRow.classList.add('agh-log-value');
+				logRow.style.display = 'block';
+				logRow.style.width = '100%';
+				logRow.style.maxWidth = 'none';
+			}
+
+			if (logTitle)
+				logTitle.style.display = 'none';
+
+			if (logField) {
+				logField.style.display = 'block';
+				logField.style.width = '100%';
+				logField.style.maxWidth = 'none';
+				logField.style.paddingLeft = '0';
+				logField.style.paddingRight = '0';
+			}
+
+			logContainer.style.width = '100%';
+			logContainer.style.maxWidth = 'none';
+		}
+
 		const logArea = rendered.querySelector('#agh-syslog');
-        const verboseStatus = rendered.querySelector('#agh-verbose-status');
+		const refreshLogButton = rendered.querySelector('#btn-agh-log-refresh');
+		let logLoading = false;
 
-        const loadLogs = async () => {
+		const loadLogs = async () => {
+			if (!logArea || logLoading)
+				return;
+
+			logLoading = true;
 			try {
-		        const text = await fs.exec_direct('/sbin/logread', [
-	        		'-e',
-	        		'AdGuardHome'
-    		]);
+				const text = await fs.exec_direct('/sbin/logread', ['-e', 'AdGuardHome']);
+				const lines = text.trim()
+					? text.trim().split(/\n/).reverse().slice(0, 50)
+					: [];
 
-    		const lines = text.trim()
-	    		? text.trim().split(/\n/).reverse().slice(0, 50)
-	    		: [];
+				logArea.value = lines.join('\n');
+				logArea.scrollTop = 0;
+			} catch (e) {
+				console.error(e);
+				logArea.value = _('Unable to load log data: ') + e.message;
+			} finally {
+				logLoading = false;
+			}
+		};
 
-    		if (logArea)
-    			logArea.value = lines.join('\n');
-        	} catch (e) {
-    		    console.error(e);
+		const refreshLogs = async () => {
+			if (refreshLogButton)
+				refreshLogButton.disabled = true;
 
-    	    	if (logArea)
-    		    	logArea.value = _('Unable to load log data: ') + e.message;
-    	    }
-        };
+			await loadLogs();
 
-        const updateVerboseStatus = () => {
-        	const sections = uci.sections('adguardhome', 'adguardhome');
-        	const verbose = sections.length > 0 && sections[0].verbose === '1';
+			if (refreshLogButton)
+				refreshLogButton.disabled = false;
+		};
 
-        	if (verboseStatus)
-        		dom.content(
-         			verboseStatus,
-	        		verbose ? _('Enabled') : _('Disabled')
-        		);
-        };
+		if (refreshLogButton)
+			refreshLogButton.addEventListener('click', refreshLogs);
 
-        loadLogs();
-        updateVerboseStatus();
+		refreshLogs();
+
+		poll.add(() => {
+			if (logArea && document.body.contains(logArea))
+				loadLogs();
+		}, POLL_INTERVAL);
 
 		const statusNode = map.findElement('data-field', statusOpt.cbid('status_section'));
 		poll.add(updateStatus(statusNode), POLL_INTERVAL);
