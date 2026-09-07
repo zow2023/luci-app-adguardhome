@@ -301,7 +301,6 @@ dnsmasq_state_restore() {
 	fi
 
 	/etc/init.d/dnsmasq reload >/dev/null 2>&1
-	agh_reload
 
 	rm -f "$DNSMASQ_STATE_FILE"
 
@@ -402,16 +401,6 @@ use_port53() {
 	uci commit dhcp
 
 	/etc/init.d/dnsmasq reload >/dev/null 2>&1
-	agh_reload
-}
-
-
-# ubus reload helper
-
-agh_reload() {
-	ubus call service event \
-		'{"type":"config.change","data":{"package":"adguardhome"}}' \
-		>/dev/null 2>&1
 }
 
 
