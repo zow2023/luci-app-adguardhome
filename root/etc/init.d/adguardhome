@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
 # shellcheck disable=SC3043 # ash supports local
+
 . /usr/share/AdGuardHome/helper.sh
 
 # matches dnsmasq
@@ -277,45 +278,43 @@ start_service() {
 
 
 service_started() {
-	local i
 
 	# No configuration file means no redirect takeover.
 	[ -f "$(uci -q get adguardhome.config.config_file)" ] ||
 		return 0
 
-	# Wait briefly for the procd-managed process to become visible.
-	for i in 1 2 3 4 5 6 7 8 9 10; do
-		if pgrep -f "$(basename "$PROG")" >/dev/null 2>&1; then
-			if ! "$CONTROL_SCRIPT" 1; then
-				logger -t adguardhome \
-					"failed to apply redirect mode after service start"
-				return 1
-			fi
+	#
+	# procd already manages the process state.
+	# Do not use pgrep here.
+	#
+	# With jail/no_new_privs enabled the process may not be visible
+	# immediately from the host namespace. Waiting with pgrep can make
+	# procd think the service failed and terminate it.
+	#
 
-			return 0
-		fi
+	if ! "$CONTROL_SCRIPT" 1; then
+		logger -t adguardhome \
+			"failed to apply redirect mode after service start"
+		return 1
+	fi
 
-		sleep 1
-	done
-
-	logger -t adguardhome \
-		"AdGuard Home process did not start within 10s; redirect not applied"
-
-	return 1
+	return 0
 }
 
 
 service_stopped() {
-	# procd has already killed the managed AdGuardHome instance here.
+
 	#
-	# This ordering matters for exchange mode: AGH releases port 53 first,
-	# then control.sh restores dnsmasq and the original AGH port.
+	# procd has already stopped AdGuardHome.
+	# Restore dnsmasq / redirect state afterwards.
+	#
+
 	if ! "$CONTROL_SCRIPT" 0; then
 		logger -t adguardhome \
 			"failed to restore redirect state after service stop"
 	fi
 
-	touch /var/run/AdGserverdis
+	return 0
 }
 
 
@@ -370,11 +369,7 @@ isrunning() {
 
 
 force_reload() {
-	if _isrunning; then
-		procd_send_signal adguardhome adguardhome HUP
-	else
-		start
-	fi
+	restart
 }
 
 
