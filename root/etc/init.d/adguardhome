@@ -57,11 +57,22 @@ do_crontab() {
 	findstr="/usr/share/AdGuardHome/update_core.sh"
 	default="30 3 * * * /usr/share/AdGuardHome/update_core.sh 2>&1"
 
-	if [ "$enabled" = "0" ] ||
-		[ "${crontab//autoupdate/}" = "$crontab" ]; then
+	#
+	# NOTE: ${var//pat/} and ${var:0:1} are Bash-isms.  OpenWrt's
+	# busybox ash (ASH_BASH_COMPAT=y) accepts them, but strict POSIX
+	# shells (dash) do not.  Use case constructs for portability.
+	#
+	if [ "$enabled" = "0" ]; then
 		cronenable=0
 	else
-		cronenable=1
+		case "$crontab" in
+			*autoupdate*)
+				cronenable=1
+				;;
+			*)
+				cronenable=0
+				;;
+		esac
 	fi
 
 	crontab_editor
@@ -81,7 +92,20 @@ crontab_editor() {
 
 	line="$(grep "$findstr" "$CRON_FILE" 2>/dev/null)"
 
-	if [ "${line:0:1}" != "#" ]; then
+	#
+	# A disabled entry starts with '#'; an empty string means the
+	# entry is not present at all.
+	#
+	case "$line" in
+		\#*)
+			line_comment=1
+			;;
+		*)
+			line_comment=0
+			;;
+	esac
+
+	if [ "$line_comment" -eq 0 ]; then
 
 		if [ "$cronenable" -eq 1 ]; then
 
@@ -101,7 +125,7 @@ crontab_editor() {
 
 		if [ "$cronenable" -eq 1 ]; then
 			sed -i "\\,$findstr,d" "$CRON_FILE"
-			echo "${line:1}" >> "$CRON_FILE"
+			echo "${line#\#}" >> "$CRON_FILE"
 			cronreload=$((cronreload + 1))
 		fi
 
@@ -286,10 +310,32 @@ start_service() {
 	#
 	if [ ! -f "$PROG" ]; then
 
+		logger -t adguardhome \
+			"core binary missing; downloading and waiting for it"
+
 		"$CONTROL_SCRIPT" 0
 
 		/usr/share/AdGuardHome/update_core.sh \
 			>/tmp/AdGuardHome_update.log 2>&1 &
+
+		#
+		# Same pattern as the "no YAML yet" branch: register a
+		# placeholder instance that merely waits for the core
+		# binary to appear, then exits.  respawn re-runs
+		# watchconfig-start path, which then creates the real
+		# AdGuardHome instance - so a fresh install started
+		# from LuCI comes up without any manual terminal step.
+		#
+		procd_open_instance "waitcore"
+
+		procd_set_param command \
+			/bin/sh -c "while [ ! -x $PROG ]; do sleep 2; done"
+
+		procd_set_param respawn 3600 1
+		procd_set_param stdout 1
+		procd_set_param stderr 1
+
+		procd_close_instance
 
 		return 0
 	fi
@@ -328,7 +374,16 @@ start_service() {
 
 		#
 		# No YAML yet.
-		# AGH will create it later.
+		# AGH will create it later (setup wizard on :3000).
+		#
+		# ROOT-CAUSE FIX for "LuCI cannot start on the very first
+		# run": this branch used to register only a bare
+		# "waitconfig" instance and returned, so *no* AdGuardHome
+		# process ever appeared - the LuCI start button looked
+		# dead.  watchconfig.sh must exit as soon as the YAML
+		# exists; the respawn below then re-runs watchconfig (and
+		# thus this whole start path), which will take the
+		# full-instance branch above and really start AdGuardHome.
 		#
 		"$CONTROL_SCRIPT" 0
 
@@ -338,7 +393,17 @@ start_service() {
 			procd_set_param command \
 				"/usr/share/AdGuardHome/watchconfig.sh"
 
+			# Re-run watchconfig if it exits before the YAML
+			# exists, so the real instance is created without
+			# manual intervention.
+			procd_set_param respawn 3600 1
+			procd_set_param stdout 1
+			procd_set_param stderr 1
+
 			procd_close_instance
+
+			logger -t adguardhome \
+				"waiting for $config_file before starting AdGuardHome"
 		fi
 
 		return 0
@@ -438,7 +503,10 @@ start_service() {
 	(
 		sleep 10
 
-		if ! pgrep -f "$(basename "$PROG")" >/dev/null 2>&1; then
+		# Anchor the pattern to the full binary path so pgrep -f
+		# cannot match unrelated command lines that merely contain
+		# "AdGuardHome" and false-cancel the redirect.
+		if ! pgrep -f "^$PROG" >/dev/null 2>&1; then
 			logger -t adguardhome \
 				"no process in 10s cancel redirect"
 
@@ -507,12 +575,18 @@ isrunning() {
 
 force_reload() {
 	#
-	# If running, let procd restart the process.
+	# If running, ask procd to restart the instance.
 	# Otherwise create the instance through start.
 	#
-	_isrunning &&
-		procd_send_signal adguardhome ||
+	# NOTE: procd_send_signal sends SIGTERM and relies on respawn;
+	# it restarts the process but does NOT reload AGH's config.
+	# Implement reload_service() if a true config reload is wanted.
+	#
+	if _isrunning; then
+		procd_send_signal adguardhome
+	else
 		start
+	fi
 }
 
 
