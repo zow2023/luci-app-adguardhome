@@ -3,6 +3,15 @@
 
 . /usr/share/AdGuardHome/helper.sh
 
+#
+# When invoked through LuCI/rpcd the environment may carry a
+# restricted PATH that lacks /usr/sbin (nft, fw4) and /sbin (uci).
+# Normalize it so redirect management can never silently fail.
+# This is a common cause of "manual terminal start works, LuCI
+# start does nothing on the first run".
+#
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+
 ENABLED="$1"
 
 NFT_RULES_TPL="/usr/share/AdGuardHome/adguardhome.nft.tpl"
@@ -58,17 +67,18 @@ set_nft_redirect() {
 		sed \
 			-e "s/__WAN_EXCLUDES__/${wan_nft_set}/g" \
 			-e "s/__AGH_PORT__/${port}/g" \
-			"$NFT_RULES_TPL" > "$NFT_RULES_FILE"
+			"$NFT_RULES_TPL" > "$NFT_RULES_FILE" || {
+			logger -t adguardhome "failed to generate nft rules"
+			return 1
+		}
 	else
 		sed \
 			-e "/iifname { __WAN_EXCLUDES__ } return/d" \
 			-e "s/__AGH_PORT__/${port}/g" \
-			"$NFT_RULES_TPL" > "$NFT_RULES_FILE"
-	fi
-
-	if [ $? -ne 0 ]; then
-		logger -t adguardhome "failed to generate nft rules"
-		return 1
+			"$NFT_RULES_TPL" > "$NFT_RULES_FILE" || {
+			logger -t adguardhome "failed to generate nft rules"
+			return 1
+		}
 	fi
 
 	if ! nft -c -f "$NFT_RULES_FILE" >/dev/null 2>&1; then
@@ -104,7 +114,7 @@ set_nft_redirect() {
 
 clear_nft_redirect() {
 	if ! nft list table inet "$NFT_TABLE" >/dev/null 2>&1; then
-		[ -f "$NFT_RULES_FILE" ] && > "$NFT_RULES_FILE"
+		[ -f "$NFT_RULES_FILE" ] && : > "$NFT_RULES_FILE"
 		return 0
 	fi
 
@@ -113,7 +123,7 @@ clear_nft_redirect() {
 		return 1
 	fi
 
-	[ -f "$NFT_RULES_FILE" ] && > "$NFT_RULES_FILE"
+	[ -f "$NFT_RULES_FILE" ] && : > "$NFT_RULES_FILE"
 
 	if ! fw4 reload >/dev/null 2>&1; then
 		logger -t adguardhome \
@@ -138,6 +148,14 @@ dnsmasq_state_save() {
 	local configpath="$1" mode="$2" agh_port="$3"
 	local server_values value resolvfile noresolv dnsmasq_port
 
+	#
+	# Idempotence by presence only.  NOTE: a stale state file left
+	# by a crashed/aborted run (e.g. power loss right after apply)
+	# will make every later run skip saving, so a later restore
+	# could overwrite the *current* dnsmasq configuration.  If you
+	# see "restored original dnsmasq configuration" unexpectedly,
+	# inspect /etc/adguardhome/dnsmasq.state.
+	#
 	[ -f "$DNSMASQ_STATE_FILE" ] && return 0
 
 	mkdir -p "$DNSMASQ_STATE_DIR" || {
@@ -523,9 +541,11 @@ _do_redirect() {
 	fi
 
 	if [ -z "$current_dnsmasq_port" ]; then
+		# dnsmasq's built-in default; do NOT write it back into
+		# UCI here - rewriting user config on every start path
+		# confuses procd config-change triggers and can fight
+		# with dnsmasq_state_restore.
 		current_dnsmasq_port='53'
-		uci set dhcp.@dnsmasq[0].port='53'
-		uci commit dhcp
 	fi
 
 	if [ -f "$DNSMASQ_STATE_FILE" ]; then
