@@ -616,3 +616,19 @@ service_triggers() {
 			/etc/init.d/adguardhome restart
 	fi
 }
+
+
+# ---------------------------------------------------------------------------
+# FIX: 当服务处于未运行状态时, LuCI 的 apply (调用 reload) 应直接 start
+# 而不是走默认的 stop + start, 避免对未注册服务 stop 导致 ubus 报错。
+# ---------------------------------------------------------------------------
+reload_service() {
+	if _isrunning; then
+		stop
+		start
+	else
+		start
+	fi
+
+	return 0
+}
