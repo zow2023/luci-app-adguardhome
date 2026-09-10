@@ -11,8 +11,7 @@
 				"/var/run/AdGserverdis": [ "read" ],
 				"/etc/adguardhome/adguardhome.yaml": [ "read" ],
 				"/usr/bin/AdGuardHome": [ "exec" ],
-				"/sbin/logread": [ "stat", "exec" ],
-				"/sbin/logread -e AdGuardHome": [ "exec" ]
+				"/sbin/logread": [ "exec" ]
 			},
 			"ubus": {
 				"service": [ "list" ]
@@ -21,8 +20,11 @@
 		},
 		"write": {
 			"file": {
+				"/etc/init.d/adguardhome": [ "exec" ],
 				"/usr/share/AdGuardHome/update_core.sh": [ "exec" ],
-				"/var/run/update_core_done": [ "write" ]
+				"/var/run/update_core_done": [ "write" ],
+				"/var/run/**": [ "write" ],
+				"/etc/adguardhome/**": [ "write" ]
 			},
 			"uci": [ "adguardhome" ]
 		}
