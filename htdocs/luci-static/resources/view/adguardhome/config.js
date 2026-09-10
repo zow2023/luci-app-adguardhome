@@ -103,6 +103,47 @@ function validateWorkDir(_unused, value) {
 	return true;
 }
 
+//
+// FIX: robust YAML section extraction helpers.
+// The previous code matched the *second* occurrence of "port:" anywhere
+// in the file and assumed it was dns.port, and matched the *first*
+// "address:" anywhere for the WebUI listener.  Both break when sections
+// are reordered or absent (pprof, tls, etc.).  Now we locate the
+// "dns:" / "http:" top-level sections first and only parse inside them.
+//
+
+function extractSection(yaml, section) {
+	const re = new RegExp(`(?:^|\\n)${section}:\\s*(?:#.*)?\\n`);
+	const m = yaml.match(re);
+	if (!m) {
+		return null;
+	}
+	const start = m.index + m[0].length;
+	// The section body continues until the next non-indented line.
+	const rest = yaml.slice(start);
+	const endMatch = rest.match(/^(?!\s)(?!\s*$)/m);
+	const body = endMatch ? rest.slice(0, endMatch.index) : rest;
+	return body;
+}
+
+function extractDnsPort(yaml) {
+	const body = extractSection(yaml, 'dns');
+	if (!body) {
+		return null;
+	}
+	const pm = body.match(/^\s*port:\s*["']?(\d+)/m);
+	return pm ? pm[1] : null;
+}
+
+function extractHttpAddress(yaml) {
+	const body = extractSection(yaml, 'http');
+	if (!body) {
+		return null;
+	}
+	const am = body.match(/^\s*address:\s*["']?([^\s"']+)/m);
+	return am ? am[1] : null;
+}
+
 return view.extend({
 	load() {
 		return Promise.all([
@@ -118,20 +159,14 @@ return view.extend({
 	},
 
 	async render([isRunning, version, yamlContent]) {
-		// If there is a version number, it means that the kernel exists. If there is no version number, it does not exist.
 		const coreExists = Boolean(version);
-		let dnsPort = '53';
-		if (yamlContent) {
-			const portMatches = yamlContent.match(/port:\s*(\d+)/g);
-			if (portMatches && portMatches.length >= 2) {
-				const actualPort = portMatches[1].match(/\d+/);
-				if (actualPort) {
-					dnsPort = actualPort[0];
-				}
-			}
+
+		// FIX: parse dns.port from its own section.
+		let dnsPort = yamlContent ? extractDnsPort(yamlContent) : null;
+		if (!dnsPort) {
+			dnsPort = '53';
 		}
 
-		// 💡 Dynamic security value: UI rendering requires httpport to generate jump links
 		const sections = uci.sections('adguardhome', 'adguardhome');
 		const savedHttpPort = (sections.length > 0 && sections[0].httpport) ? sections[0].httpport : '3008';
 
@@ -173,7 +208,6 @@ return view.extend({
 
 		mainSect.tab('logs', _('Logs'));
 
-		// ==== Move here: global switch ====
 		const enabledOpt = mainSect.taboption(
 			'general',
 			form.Flag,
@@ -182,7 +216,6 @@ return view.extend({
 		);
 		enabledOpt.default = '0';
 		enabledOpt.rmempty = false;
-		// If the kernel does not exist, additional warning prompts will guide users to turn on the service to download automatically.
 		if (!coreExists) {
 			enabledOpt.description = `<span style="color: var(--error-color-high); font-weight: bold;">${_('Core binary not found. Enable the service to trigger an automatic download.')}</span>`;
 		}
@@ -252,7 +285,6 @@ return view.extend({
 		advSettingsOpt.remove = () => {};
 		advSettingsOpt.write = (_, value) => sessionStorage.setItem(STORAGE_KEY, value);
 
-		// ==== New: The switch of Core Update on General tab ====
 		const coreUpdateToggleOpt = mainSect.taboption(
 			'general',
 			form.Flag,
@@ -265,7 +297,6 @@ return view.extend({
 		coreUpdateToggleOpt.load = () => sessionStorage.getItem(STORAGE_KEY_CORE) || '0';
 		coreUpdateToggleOpt.remove = () => {};
 		coreUpdateToggleOpt.write = (_, value) => sessionStorage.setItem(STORAGE_KEY_CORE, value);
-		// ==========================================
 
 		mainSect.taboption('jail', form.DynamicList, 'jail_mount', _('Read-only access'));
 		mainSect.taboption('jail', form.DynamicList, 'jail_mount_rw', _('Read-write access'));
@@ -339,41 +370,35 @@ return view.extend({
 			</div>
 		`;
 
-		// 💡 1. Extract the real listening address and port directly from YAML
+		// FIX: parse the WebUI listener from the http: section only.
 		let realHttpAddress = '0.0.0.0:3008';
 		if (yamlContent) {
-			// Match the address: field below http: in YAML
-			const addrMatch = yamlContent.match(/address:\s*([^\s]+)/);
-			if (addrMatch && addrMatch[1]) {
-				realHttpAddress = addrMatch[1];
+			const addr = extractHttpAddress(yamlContent);
+			if (addr) {
+				realHttpAddress = addr;
 			}
 		}
 
-		// 💡 2. Analyze the real IP and port used by the jump button
 		let linkIp = window.location.hostname;
 		let linkPort = '3008';
 		const addrParts = realHttpAddress.split(':');
 		if (addrParts.length >= 2) {
 			linkPort = addrParts.pop();
 			let ipPart = addrParts.join(':').replace(/\[|\]/g, '');
-			// If the binding is a full zero address, the IP accessed by the current router will be returned.
 			if (ipPart !== '0.0.0.0' && ipPart !== '') {
 				linkIp = ipPart;
 			}
 		}
 
-		// 💡 3. Upgrade the original httpport to http_address
 		const isServiceEnabled = sections.length > 0 && sections[0].enabled === '1';
 		const disabledHint = _('Service is disabled. Please go to "General Settings" to enable it.');
 
-		// 💡 4. WebUI button HTML to construct intelligent state
 		const webuiBtnHtml = isServiceEnabled
 			? `<a class="btn cbi-button cbi-button-link" style="font-weight:bold; display:inline-block; margin-top:5px;" href="http://${linkIp}:${linkPort}" target="_blank">${_('Open AdGuardHome WebUI')}</a>`
 			: `<span title='${disabledHint}' style="display:inline-block; margin-top:5px; cursor:not-allowed;">
 					<a class="btn cbi-button cbi-button-link" style="font-weight:bold; pointer-events:none; opacity:0.5; margin-top:0;" href="javascript:void(0);">${_('Open AdGuardHome WebUI')}</a>
 			   </span>`;
 
-		// 💡 5. Rendering components
 		const httpAddressOpt = mainSect.taboption(
 			'dns_redirect',
 			form.Value,
@@ -387,12 +412,10 @@ return view.extend({
 		httpAddressOpt.datatype = 'hostport';
 		httpAddressOpt.rmempty = false;
 
-		// 🎯 Overwrite the default reading UCI behavior and forcibly echo the real value in YAML
 		httpAddressOpt.cfgvalue = function(section_id) {
 			return realHttpAddress;
 		};
 
-		// ==== Add the password modification function below the WebUI port ====
 		const isPasswordEmpty = yamlContent ? /password:[ \t]*(\r?\n|$)/.test(yamlContent) : false;
 		const hashPassOpt = mainSect.taboption(
 			'dns_redirect',
@@ -426,9 +449,7 @@ return view.extend({
 		redirectOpt.value('exchange', _('Use port 53 to replace dnsmasq'));
 		redirectOpt.default = 'none';
 		redirectOpt.rmempty = false;
-		// ==========================================
 
-		// ======== Core Update Control content ========
 		const coreVersionOpt = mainSect.taboption(
 			'core_update',
 			form.ListValue,
@@ -473,7 +494,6 @@ return view.extend({
 			</div>
 		`;
 		updateActionOpt.depends('enable_core_update', '1');
-		// ==========================================
 
 		const rendered = await map.render();
 
@@ -553,11 +573,22 @@ return view.extend({
 		const statusNode = map.findElement('data-field', statusOpt.cbid('status_section'));
 		poll.add(updateStatus(statusNode), POLL_INTERVAL);
 
-		// ========== Update the status and polling logic =========
+		// ========== Update status and polling logic ==========
 		let updatePollId = null;
 
 		function startLogPolling() {
 			if (updatePollId) clearInterval(updatePollId);
+
+			//
+			// FIX: the first pollAction tick used to run before rpcd had
+			// even spawned the script, so no state/done/error file existed
+			// and the UI immediately showed "Already up-to-date" and
+			// stopped polling.  We now wait for /var/run/update_core to
+			// appear (up to 15s) before making any verdict.
+			//
+			let stateSeen = false;
+			let startTime = Date.now();
+
 			const pollAction = () => {
 				const btnU = document.getElementById('btn-agh-update');
 				const btnF = document.getElementById('btn-agh-force');
@@ -580,6 +611,11 @@ return view.extend({
 					fs.stat('/var/run/update_core_done').catch(() => null),
 					fs.stat('/var/run/update_core_error').catch(() => null)
 				]).then(([isCore, isDone, isError]) => {
+					if (isCore) {
+						stateSeen = true;
+						return;
+					}
+
 					if (isDone) {
 						clearInterval(updatePollId);
 						fs.remove('/var/run/update_core_done').catch(() => {});
@@ -593,13 +629,28 @@ return view.extend({
 							btnU.disabled = false;
 							btnU.textContent = _('Failed');
 						}
-					} else if (!isCore && !isDone && !isError) {
+					} else if (stateSeen) {
+						// State file was visible and has now been cleaned
+						// up by the script itself: treat as finished.
 						clearInterval(updatePollId);
 						if (btnU) {
 							btnU.disabled = false;
 							btnU.textContent = _('Already up-to-date');
 						}
+					} else if (Date.now() - startTime > 15000) {
+						// Never saw the state file at all: the spawn likely
+						// failed (ACL, missing script, ...).  Stop polling
+						// and surface it instead of spinning forever.
+						clearInterval(updatePollId);
+						if (btnU) {
+							btnU.disabled = false;
+							btnU.textContent = _('Failed');
+						}
+						if (logT) {
+							logT.value += _('\n[LuCI] Update task did not start within 15 seconds. Check the rpcd ACL and system log.\n');
+						}
 					}
+					// else: keep waiting for the state file to appear.
 				});
 			};
 
@@ -642,12 +693,10 @@ return view.extend({
 				e.preventDefault();
 				applyUpdate(true);
 			} 
-			// ==== Handle front-end hash encryption logic ====
 			else if (e.target && e.target.id === 'btn-agh-calc-hash') {
 				e.preventDefault();
 				const btn = e.target;
 
-				// Dynamically find the password input box on the page (matching elements with the suffix .hashpass)
 				const inputs = rendered.querySelectorAll('input[type="text"], input[type="password"]');
 				let passInput = null;
 				for (const el of inputs) {
@@ -659,7 +708,6 @@ return view.extend({
 
 				if (!passInput) return;
 
-				// 1. If JS has not been loaded, it will be loaded dynamically.
 				if (typeof window.TwinBcrypt === 'undefined') {
 					btn.disabled = true;
 					btn.textContent = _('Loading...');
@@ -678,10 +726,8 @@ return view.extend({
 					};
 					document.head.appendChild(script);
 				} 
-				// 2. If JS has been loaded, the calculation will be executed.
 				else {
 					if (passInput.value) {
-						// Prevent repeated hashing of hashed strings (starting with $2a$ or $2y$)
 						if (passInput.value.startsWith('$2a$') || passInput.value.startsWith('$2y$')) {
 							btn.textContent = _('Calculation already DONE !');
 							return;
@@ -690,7 +736,6 @@ return view.extend({
 						const hash = window.TwinBcrypt.hashSync(passInput.value);
 						passInput.value = hash;
 						
-						// Manually trigger native input and change events
 						passInput.dispatchEvent(new Event('input', { bubbles: true }));
 						passInput.dispatchEvent(new Event('change', { bubbles: true }));
 						
@@ -700,7 +745,6 @@ return view.extend({
 					}
 				}
 			}
-			// ==========================================
 		});
 
 		Promise.all([
@@ -713,7 +757,6 @@ return view.extend({
 				startLogPolling();
 			}
 		});
-		// ==========================================
 
 		return rendered;
 	},
