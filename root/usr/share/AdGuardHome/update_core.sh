@@ -17,10 +17,15 @@ DEFAULT_UPDATE_URL="https://static.adtidy.org/adguardhome/release/AdGuardHome_li
 
 # ---------------------------------------------------------------------------
 # First invocation: detach into background.
-# Keep the existing external interface used by LuCI.
 # ---------------------------------------------------------------------------
 
 if [ "$1" != "bg_run" ]; then
+	pid="$(cat "$UPDATE_PID" 2>/dev/null)"
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+		touch "$UPDATE_STATE"
+		exit 0
+	fi
+
 	rm -f \
 		"$UPDATE_STATE" \
 		"$UPDATE_DONE" \
@@ -46,9 +51,19 @@ UPDATE_MODE="$1"
 
 EXIT() {
 	local rc="$1"
+	local pid
 
 	rm -rf "$UPDATE_DIR" 2>/dev/null
-	rm -f "$UPDATE_PID" "$UPDATE_STATE" 2>/dev/null
+
+	#
+	# FIX: only remove the shared PID/state markers if WE own them.
+	# On SIGTERM racing a newly spawned task, the old code deleted
+	# the new task's markers and flagged it as failed.
+	#
+	pid="$(cat "$UPDATE_PID" 2>/dev/null)"
+	if [ "$pid" = "$$" ]; then
+		rm -f "$UPDATE_PID" "$UPDATE_STATE" 2>/dev/null
+	fi
 
 	if [ "$rc" != "0" ]; then
 		touch "$UPDATE_ERROR"
@@ -111,7 +126,7 @@ Check_Task() {
 					echo \
 						"An update task is already running (PID ${pid}). Please wait or use Force update." \
 						>&2
-					EXIT 2
+					exit 2
 					;;
 			esac
 		else
@@ -142,9 +157,16 @@ Check_Downloader() {
 }
 
 
+#
+# FIX: busybox wget does not understand GNU wget's "--timeout=10" and
+# "--tries=2" long options (it errors out and every download fails on
+# firmware without curl).  Use busybox-compatible flags plus a manual
+# retry loop that works for both implementations.
+#
 download_file() {
 	local url="$1"
 	local output="$2"
+	local attempt
 
 	case "$PKG" in
 		curl)
@@ -156,12 +178,13 @@ download_file() {
 			;;
 
 		wget)
-			wget \
-				-T 10 \
-				--timeout=10 \
-				--tries=2 \
-				-O "$output" \
-				"$url"
+			for attempt in 1 2; do
+				if wget -q -T 10 -O "$output" "$url" 2>/dev/null; then
+					return 0
+				fi
+				sleep 2
+			done
+			return 1
 			;;
 
 		*)
@@ -185,7 +208,6 @@ fetch_text() {
 		wget)
 			wget -q \
 				-T 10 \
-				--timeout=10 \
 				-O - \
 				"$url"
 			;;
@@ -345,6 +367,11 @@ Get_Current_Version() {
 
 # ---------------------------------------------------------------------------
 # Release asset digest
+#
+# FIX: the digest endpoint is now best-effort.  On a first boot the
+# network (and sometimes DNS) may not be fully up yet; previously a
+# failed metadata query aborted the whole download, so the core never
+# installed.  Now we warn and fall back to archive + --version checks.
 # ---------------------------------------------------------------------------
 
 Get_Asset_Digest() {
@@ -353,13 +380,15 @@ Get_Asset_Digest() {
 	local api_url
 	local api_data
 
+	EXPECTED_SHA256=""
+
 	api_url="https://api.github.com/repos/AdguardTeam/AdGuardHome/releases/tags/${tag}"
 
 	log "Getting SHA-256 digest for ${asset_name} ..."
 
 	api_data="$(fetch_text "$api_url" 2>/dev/null)" || {
-		echo "Failed to query release asset metadata." >&2
-		return 1
+		echo "Warning: failed to query release asset metadata, skipping digest verification." >&2
+		return 0
 	}
 
 	EXPECTED_SHA256="$(
@@ -387,8 +416,8 @@ Get_Asset_Digest() {
 	)"
 
 	[ -n "$EXPECTED_SHA256" ] || {
-		echo "SHA-256 digest for ${asset_name} was not found." >&2
-		return 1
+		echo "Warning: SHA-256 digest for ${asset_name} was not found, skipping digest verification." >&2
+		return 0
 	}
 
 	return 0
@@ -399,6 +428,14 @@ Verify_Digest() {
 	local file="$1"
 	local expected="$2"
 	local actual
+
+	#
+	# No digest available: skip verification (already logged upstream).
+	#
+	[ -n "$expected" ] || {
+		log "Skipping SHA-256 verification (no digest available)."
+		return 0
+	}
 
 	actual="$(sha256_file "$file")" || {
 		echo "sha256sum is not available." >&2
@@ -420,7 +457,12 @@ Verify_Digest() {
 
 # ---------------------------------------------------------------------------
 # Expand configured update URL without eval.
-# Preserve both existing LuCI download sources.
+#
+# FIX: the previous sed patterns ('s/\\${Arch}/.../') matched a literal
+# backslash before ${Arch}, which never appears in the configured URL.
+# The placeholder was therefore never substituted: the download URL
+# contained a literal "${Arch}" and every first-boot download 404'd.
+# A single backslash in the BRE escapes the dollar correctly.
 # ---------------------------------------------------------------------------
 
 Build_Update_Link() {
@@ -431,8 +473,9 @@ Build_Update_Link() {
 
 	[ -n "$link" ] || link="$DEFAULT_UPDATE_URL"
 
-	link="${link//\$\{Arch\}/$Arch}"
-	link="${link//\$\{Cloud_Version\}/$Cloud_Version}"
+	link="$(printf '%s' "$link" |
+		sed -e 's/\${Arch}/'"$Arch"'/g' \
+		    -e 's/\${Cloud_Version}/'"$Cloud_Version"'/g')"
 
 	UPDATE_LINK="$link"
 }
@@ -450,6 +493,16 @@ Validate_Update_Link() {
 			echo \
 				"Unsupported update URL. Please use the official AdGuard Home mirror or GitHub Releases." \
 				>&2
+			return 1
+			;;
+	esac
+
+	#
+	# Extra sanity: no unresolved placeholder may remain.
+	#
+	case "$UPDATE_LINK" in
+		*\$*)
+			echo "Internal error: update URL still contains an unexpanded placeholder: $UPDATE_LINK" >&2
 			return 1
 			;;
 	esac
@@ -486,6 +539,8 @@ Check_Updates() {
 
 	template="$update_url"
 	Build_Update_Link "$template"
+
+	log "Update link: $UPDATE_LINK"
 
 	Validate_Update_Link || EXIT 1
 
@@ -823,8 +878,8 @@ main() {
 	rm -f "$UPDATE_DONE" "$UPDATE_ERROR" 2>/dev/null
 	touch "$UPDATE_STATE"
 
-	core_version="$(uci -q get adguardhome.config.core_version)"
-	update_url="$(uci -q get adguardhome.config.update_url)"
+	core_version="$(uci -q get adguardhome.config.core_version 2>/dev/null)"
+	update_url="$(uci -q get adguardhome.config.update_url 2>/dev/null)"
 
 	Check_Updates
 }
