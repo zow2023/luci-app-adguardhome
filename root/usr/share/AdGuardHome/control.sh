@@ -6,9 +6,6 @@
 #
 # When invoked through LuCI/rpcd the environment may carry a
 # restricted PATH that lacks /usr/sbin (nft, fw4) and /sbin (uci).
-# Normalize it so redirect management can never silently fail.
-# This is a common cause of "manual terminal start works, LuCI
-# start does nothing on the first run".
 #
 export PATH="/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
@@ -148,14 +145,6 @@ dnsmasq_state_save() {
 	local configpath="$1" mode="$2" agh_port="$3"
 	local server_values value resolvfile noresolv dnsmasq_port
 
-	#
-	# Idempotence by presence only.  NOTE: a stale state file left
-	# by a crashed/aborted run (e.g. power loss right after apply)
-	# will make every later run skip saving, so a later restore
-	# could overwrite the *current* dnsmasq configuration.  If you
-	# see "restored original dnsmasq configuration" unexpectedly,
-	# inspect /etc/adguardhome/dnsmasq.state.
-	#
 	[ -f "$DNSMASQ_STATE_FILE" ] && return 0
 
 	mkdir -p "$DNSMASQ_STATE_DIR" || {
@@ -510,14 +499,14 @@ _do_redirect() {
 		config_agh_port='0'
 
 	current_dnsmasq_port="$(
-		uci -q get dhcp.@dnsmasq[0].port
+		uci -q get dhcp.@dnsmasq[0].port 2>/dev/null
 	)"
 
 	[ -n "$current_dnsmasq_port" ] ||
 		current_dnsmasq_port='53'
 
 	redirect="$(
-		uci -q get adguardhome.config.redirect
+		uci -q get adguardhome.config.redirect 2>/dev/null
 	)"
 
 	[ -n "$redirect" ] ||
@@ -538,14 +527,6 @@ _do_redirect() {
 			sed -n 's/^old_enabled=//p' "$RUNTIME_STATE_FILE" |
 				tr -d '"'
 		)"
-	fi
-
-	if [ -z "$current_dnsmasq_port" ]; then
-		# dnsmasq's built-in default; do NOT write it back into
-		# UCI here - rewriting user config on every start path
-		# confuses procd config-change triggers and can fight
-		# with dnsmasq_state_restore.
-		current_dnsmasq_port='53'
 	fi
 
 	if [ -f "$DNSMASQ_STATE_FILE" ]; then
@@ -573,12 +554,10 @@ _do_redirect() {
 		fi
 	fi
 
-	current_dnsmasq_port="$(
-		uci -q get dhcp.@dnsmasq[0].port
-	)"
-
-	[ -n "$current_dnsmasq_port" ] ||
-		current_dnsmasq_port='53'
+	#
+	# FIX: removed the dead second fallback of current_dnsmasq_port
+	# (it was already defaulted above).
+	#
 
 	if [ "$old_enabled" = '1' ] &&
 		[ "$old_redirect" = 'redirect' ]; then
@@ -627,7 +606,7 @@ _do_redirect() {
 
 	elif [ "$redirect" = 'exchange' ]; then
 		current_dnsmasq_port="$(
-			uci -q get dhcp.@dnsmasq[0].port
+			uci -q get dhcp.@dnsmasq[0].port 2>/dev/null
 		)"
 
 		[ -n "$current_dnsmasq_port" ] ||
@@ -661,6 +640,42 @@ EOF_STATE
 
 	return 0
 }
+
+
+# ---------------------------------------------------------------------------
+# Controller serialization
+# ---------------------------------------------------------------------------
+#
+# FIX (deadlock): the previous loop only cleared a stale lock when a
+# pid file existed AND its owner was dead.  If the previous holder was
+# killed between mkdir and writing the pid file, an EMPTY lock dir was
+# left behind: nobody ever cleared it and every later start/stop/
+# do_redirect spun forever.  That is exactly the "once it happens, it
+# never comes back" first-boot failure.  Now: no pid file OR dead
+# owner => stale lock => clear it.
+#
+LOCK_DIR="/var/run/adguardhome.ctl.lock"
+
+while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+	if [ -f "$LOCK_DIR/pid" ]; then
+		owner="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
+
+		if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+			sleep 1
+			continue
+		fi
+	fi
+
+	#
+	# No pid file, or the recorded owner no longer exists:
+	# stale lock left behind by a killed holder.  Take it over.
+	#
+	rm -rf "$LOCK_DIR"
+done
+
+echo "$$" > "$LOCK_DIR/pid"
+
+trap 'rm -rf "$LOCK_DIR" 2>/dev/null' EXIT
 
 
 _do_redirect "$ENABLED"
