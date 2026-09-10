@@ -55,10 +55,6 @@ config_editor() {
 					result = line
 					sub(/^[^:]*:[[:space:]]*/, "", result)
 					sub(/[[:space:]]+$/, "", result)
-					# Strip surrounding quotes, e.g. port: "53"
-					# must read back as 53, otherwise downstream
-					# comparisons (use_port53 / mark_redirect_flag)
-					# fail and the start aborts.
 					if (result ~ /^".*"$/) {
 						result = substr(result, 2, length(result) - 2)
 					}
