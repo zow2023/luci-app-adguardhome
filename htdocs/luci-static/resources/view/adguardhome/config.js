@@ -158,6 +158,29 @@ return view.extend({
 		]);
 	},
 
+	handleSaveApply(ev, mode) {
+		//
+		// FIX: rpcd 的 uci apply 只 commit + 广播 config.change 事件,
+		// 从不执行 init 脚本; 而本服务的 procd triggers 未注册成功。
+		// "服务已停止 + enabled=1" 时, 保存并应用后无人启动服务。
+		// 在默认 apply(含 commit/confirm)完成后无条件补一次幂等 reload:
+		// 未运行则 start, 运行中则重启。
+		//
+		var kick = function() {
+			return fs.exec('/etc/init.d/adguardhome', ['reload'])
+				.catch(function(e) {
+					console.error('adguardhome reload failed:', e);
+				});
+		};
+
+		var base = this.super('handleSaveApply', [ev, mode]);
+
+		if (base && typeof base.then === 'function')
+			return base.then(kick, kick);
+
+		return kick();
+	},
+
 	async render([isRunning, version, yamlContent]) {
 		const coreExists = Boolean(version);
 
