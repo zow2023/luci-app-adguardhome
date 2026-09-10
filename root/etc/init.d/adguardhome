@@ -19,13 +19,15 @@ EXTRA_HELP="\
 
 CONTROL_SCRIPT="/usr/share/AdGuardHome/control.sh"
 CRON_FILE="/etc/crontabs/root"
+CAPABILITIES_FILE="/etc/capabilities/adguardhome.json"
 
 
 get_tz() {
 	SET_TZ=""
 
 	local zonename
-	local tz=""
+	local tz
+	local tzfile
 
 	zonename="$(uci -q get system.@system[0].zonename 2>/dev/null)"
 
@@ -57,11 +59,6 @@ do_crontab() {
 	findstr="/usr/share/AdGuardHome/update_core.sh"
 	default="30 3 * * * /usr/share/AdGuardHome/update_core.sh 2>&1"
 
-	#
-	# NOTE: ${var//pat/} and ${var:0:1} are Bash-isms.  OpenWrt's
-	# busybox ash (ASH_BASH_COMPAT=y) accepts them, but strict POSIX
-	# shells (dash) do not.  Use case constructs for portability.
-	#
 	if [ "$enabled" = "0" ]; then
 		cronenable=0
 	else
@@ -86,16 +83,13 @@ do_crontab() {
 
 crontab_editor() {
 	local line
+	local line_comment=0
 
 	mkdir -p /etc/crontabs
 	touch "$CRON_FILE"
 
 	line="$(grep "$findstr" "$CRON_FILE" 2>/dev/null)"
 
-	#
-	# A disabled entry starts with '#'; an empty string means the
-	# entry is not present at all.
-	#
 	case "$line" in
 		\#*)
 			line_comment=1
@@ -135,7 +129,28 @@ crontab_editor() {
 
 boot() {
 	ADGUARDHOME_BOOT=1
+
 	start "$@"
+
+	#
+	# Boot fallback.
+	#
+	# start_service returns early during boot and relies on the
+	# "interface.*.up" raw trigger.  A trigger fired BEFORE this
+	# script registers it is never replayed, so on fast-booting
+	# devices the service would never come up for this session.
+	# Re-check after a generous delay and kick it once.
+	#
+	(
+		sleep 60
+
+		if ! /etc/init.d/adguardhome isrunning >/dev/null 2>&1; then
+			logger -t adguardhome \
+				"boot fallback: service still down after 60s, restarting"
+
+			/etc/init.d/adguardhome restart
+		fi
+	) &
 }
 
 
@@ -158,7 +173,20 @@ start_service() {
 
 	config_load "adguardhome"
 
-	local config_name="config"
+	#
+	# FIX: do not hardcode the section name as "config".
+	# If /etc/config/adguardhome was first created by LuCI it may
+	# hold an anonymous section (cfgXXXXXX).  Detect it once here.
+	#
+	local config_name
+	config_name="$(
+		uci -q show adguardhome 2>/dev/null |
+			sed -n 's/^adguardhome\.\([^.]*\)=adguardhome$/\1/p' |
+			head -n 1
+	)"
+
+	[ -n "$config_name" ] ||
+		config_name="config"
 
 	local config_file
 	local config
@@ -211,43 +239,42 @@ start_service() {
 
 	#
 	# Synchronize WebUI password to YAML.
+	# FIX: only clear the UCI value after it was actually applied;
+	# when the YAML does not exist yet (first-run wizard), keep it
+	# so the next start (after the wizard wrote the YAML) applies it.
 	#
-	if [ -n "$hashpass" ]; then
+	if [ -n "$hashpass" ] && [ -f "$config_file" ]; then
 
-		if [ -f "$config_file" ]; then
-			if ! config_editor \
-				"users.password" \
-				"$hashpass" \
-				"$config_file"; then
+		if config_editor \
+			"users.password" \
+			"$hashpass" \
+			"$config_file"; then
 
-				logger -t adguardhome \
-					"failed to update users.password"
-			fi
+			uci set adguardhome."$config_name".hashpass=""
+			uci commit adguardhome
+		else
+			logger -t adguardhome \
+				"failed to update users.password"
 		fi
-
-		uci set adguardhome."$config_name".hashpass=""
-		uci commit adguardhome
 	fi
 
 
 	#
-	# Synchronize WebUI listening address to YAML.
+	# Synchronize WebUI listening address to YAML.  Same fix as above.
 	#
-	if [ -n "$http_address" ]; then
+	if [ -n "$http_address" ] && [ -f "$config_file" ]; then
 
-		if [ -f "$config_file" ]; then
-			if ! config_editor \
-				"http.address" \
-				"$http_address" \
-				"$config_file"; then
+		if config_editor \
+			"http.address" \
+			"$http_address" \
+			"$config_file"; then
 
-				logger -t adguardhome \
-					"failed to update http.address"
-			fi
+			uci set adguardhome."$config_name".http_address=""
+			uci commit adguardhome
+		else
+			logger -t adguardhome \
+				"failed to update http.address"
 		fi
-
-		uci set adguardhome."$config_name".http_address=""
-		uci commit adguardhome
 	fi
 
 
@@ -255,8 +282,7 @@ start_service() {
 
 
 	#
-	# Disabled:
-	# do not create the procd instance.
+	# Disabled: do not create the procd instance.
 	#
 	if [ "$enabled" = "0" ]; then
 		"$CONTROL_SCRIPT" 0
@@ -305,8 +331,7 @@ start_service() {
 
 
 	#
-	# Missing core:
-	# clean redirect first, then download asynchronously.
+	# Missing core: clean redirect first, then download asynchronously.
 	#
 	if [ ! -f "$PROG" ]; then
 
@@ -315,105 +340,83 @@ start_service() {
 
 		"$CONTROL_SCRIPT" 0
 
-		/usr/share/AdGuardHome/update_core.sh \
-			>/tmp/AdGuardHome_update.log 2>&1 &
+		if [ ! -f /var/run/update_core ] &&
+			[ ! -f /var/run/AdGuardHome_update.pid ]; then
 
-		#
-		# Same pattern as the "no YAML yet" branch: register a
-		# placeholder instance that merely waits for the core
-		# binary to appear, then exits.  respawn re-runs
-		# watchconfig-start path, which then creates the real
-		# AdGuardHome instance - so a fresh install started
-		# from LuCI comes up without any manual terminal step.
-		#
-		procd_open_instance "waitcore"
-
-		procd_set_param command \
-			/bin/sh -c "while [ ! -x $PROG ]; do sleep 2; done"
-
-		procd_set_param respawn 3600 1
-		procd_set_param stdout 1
-		procd_set_param stderr 1
-
-		procd_close_instance
+			/usr/share/AdGuardHome/update_core.sh \
+				>/tmp/AdGuardHome_update.log 2>&1 &
+		fi
 
 		return 0
 	fi
 
 
 	#
-	# ---------------------------------------------------------
-	# IMPORTANT:
-	#
-	# Prepare redirect BEFORE creating the AdGuardHome instance.
-	#
-	# For exchange mode this changes:
-	#
-	#     dnsmasq :53 -> :1745
-	#
-	# BEFORE AdGuardHome is allowed to bind :53.
-	#
-	# This removes the first-start race:
-	#
-	#     AGH bind 53
-	#     vs
-	#     dnsmasq move 53 -> 1745
-	#
-	# ---------------------------------------------------------
+	# FIX: redirect failure must NOT abort the service.
+	# A missing nft template, a failed fw4 reload or a validation
+	# error previously killed the whole start.  Log it and go on:
+	# a running AGH without redirect is strictly better than no AGH.
 	#
 	if [ -f "$config_file" ]; then
 
 		if ! "$CONTROL_SCRIPT" 1; then
 			logger -t adguardhome \
-				"failed to prepare redirect before service start"
-
-			return 1
+				"failed to prepare redirect before service start (continuing without redirect)"
 		fi
 
 	else
 
 		#
-		# No YAML yet.
-		# AGH will create it later (setup wizard on :3000).
-		#
-		# ROOT-CAUSE FIX for "LuCI cannot start on the very first
-		# run": this branch used to register only a bare
-		# "waitconfig" instance and returned, so *no* AdGuardHome
-		# process ever appeared - the LuCI start button looked
-		# dead.  watchconfig.sh must exit as soon as the YAML
-		# exists; the respawn below then re-runs watchconfig (and
-		# thus this whole start path), which will take the
-		# full-instance branch above and really start AdGuardHome.
+		# No YAML yet: AGH first-run wizard generates the config on
+		# its WebUI (:3000).  Register the real instance and skip
+		# redirect for now.
 		#
 		"$CONTROL_SCRIPT" 0
 
-		if [ "$redirect" != "none" ]; then
-			procd_open_instance "waitconfig"
+		logger -t adguardhome \
+			"config file not found; starting first-run setup, redirect will be applied on next start"
 
-			procd_set_param command \
-				"/usr/share/AdGuardHome/watchconfig.sh"
+		#
+		# FIX: auto-link after wizard completion.
+		# When the wizard writes the YAML nothing used to trigger
+		# the redirect/restart path, so exchange/upstream modes never
+		# engaged on the first run.  Spawn a bounded waiter (max 15
+		# minutes) that restarts the service once the YAML appears.
+		#
+		if [ ! -f /var/run/adguardhome.waitwizard ]; then
 
-			# Re-run watchconfig if it exits before the YAML
-			# exists, so the real instance is created without
-			# manual intervention.
-			procd_set_param respawn 3600 1
-			procd_set_param stdout 1
-			procd_set_param stderr 1
+			: > /var/run/adguardhome.waitwizard
 
-			procd_close_instance
+			(
+				local i
 
-			logger -t adguardhome \
-				"waiting for $config_file before starting AdGuardHome"
+				for i in $(seq 1 90); do
+					[ -f "$config_file" ] || {
+						sleep 10
+						continue
+					}
+
+					# Give AGH a moment to finish writing.
+					sleep 3
+
+					logger -t adguardhome \
+						"config file appeared after wizard, restarting to apply redirect"
+
+					rm -f /var/run/adguardhome.waitwizard
+					/etc/init.d/adguardhome restart
+					exit 0
+				done
+
+				rm -f /var/run/adguardhome.waitwizard
+				logger -t adguardhome \
+					"wizard wait timed out; run 'service adguardhome restart' manually"
+			) &
 		fi
-
-		return 0
 	fi
 
 
 	#
-	# ---------------------------------------------------------
 	# procd instance
-	# ---------------------------------------------------------
 	#
 	procd_open_instance adguardhome
 
@@ -462,8 +465,19 @@ start_service() {
 	procd_set_param user "$user"
 	procd_set_param group "$group"
 
-	procd_set_param capabilities \
-		"/etc/capabilities/adguardhome.json"
+	#
+	# FIX: warn loudly when the capabilities file is absent.
+	# Running as UID 853 with no_new_privs and no CAP_NET_BIND_SERVICE
+	# means AGH cannot bind :53 -> instant exit -> respawn loop ->
+	# "sometimes it just does not come up".  Ship the json file
+	# (/etc/capabilities/adguardhome.json) with the package.
+	#
+	if [ -f "$CAPABILITIES_FILE" ]; then
+		procd_set_param capabilities "$CAPABILITIES_FILE"
+	else
+		logger -t adguardhome \
+			"WARNING: $CAPABILITIES_FILE missing; binding ports below 1024 as user '$user' WILL FAIL"
+	fi
 
 	procd_set_param no_new_privs 1
 
@@ -497,18 +511,15 @@ start_service() {
 
 	#
 	# Safety watchdog.
-	#
 	# If AGH dies immediately, restore redirect state.
+	# FIX: 20s instead of 10s (slow devices / respawn interval).
 	#
 	(
-		sleep 10
+		sleep 20
 
-		# Anchor the pattern to the full binary path so pgrep -f
-		# cannot match unrelated command lines that merely contain
-		# "AdGuardHome" and false-cancel the redirect.
 		if ! pgrep -f "^$PROG" >/dev/null 2>&1; then
 			logger -t adguardhome \
-				"no process in 10s cancel redirect"
+				"no process in 20s cancel redirect"
 
 			"$CONTROL_SCRIPT" 0
 		fi
@@ -524,6 +535,18 @@ stop_service() {
 
 	local config_name="config"
 	local crontab
+
+	#
+	# FIX: locate the real section name (see start_service).
+	#
+	config_name="$(
+		uci -q show adguardhome 2>/dev/null |
+			sed -n 's/^adguardhome\.\([^.]*\)=adguardhome$/\1/p' |
+			head -n 1
+	)"
+
+	[ -n "$config_name" ] ||
+		config_name="config"
 
 	config_get crontab "$config_name" crontab ""
 
@@ -550,7 +573,7 @@ _isrunning() {
 	[ ! -f "$PROG" ] &&
 		return 2
 
-	pgrep -f "$(basename "$PROG")" >/dev/null 2>&1 &&
+	pgrep -f "^$PROG" >/dev/null 2>&1 &&
 		return 0
 
 	return 1
@@ -574,14 +597,6 @@ isrunning() {
 
 
 force_reload() {
-	#
-	# If running, ask procd to restart the instance.
-	# Otherwise create the instance through start.
-	#
-	# NOTE: procd_send_signal sends SIGTERM and relies on respawn;
-	# it restarts the process but does NOT reload AGH's config.
-	# Implement reload_service() if a true config reload is wanted.
-	#
 	if _isrunning; then
 		procd_send_signal adguardhome
 	else
