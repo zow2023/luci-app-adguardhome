@@ -127,7 +127,7 @@ filters:
     name: AdGuard DNS filter
     id: 1
   - enabled: false
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt
+    url: https://adrules.top/dns.txt
     name: AdAway Default Blocklist
     id: 2
 whitelist_filters: []
