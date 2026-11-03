@@ -106,7 +106,7 @@ querylog:
     - orirainwe.edu.kg^
     - coriseay.edu.kg^
     - google.com^
-  interval: 7d
+  interval: 24h
   size_memory: 1000
   enabled: true
   ignored_enabled: true
@@ -118,7 +118,7 @@ statistics:
     - orirainwe.edu.kg^
     - coriseay.edu.kg^
     - google.com^
-  interval: 7d
+  interval: 24h
   enabled: true
   ignored_enabled: true
 filters:
